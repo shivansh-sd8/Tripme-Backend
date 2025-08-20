@@ -1,0 +1,915 @@
+const User = require('../models/User');
+const Admin = require('../models/Admin');
+const VerificationToken = require('../models/VerificationToken');
+const Session = require('../models/Session');
+const { generateToken } = require('../utils/generateToken');
+const { sendEmail, sendWelcomeEmail, sendPasswordResetEmail } = require('../utils/sendEmail');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+// Google OAuth client - not needed for access token approach
+// const { OAuth2Client } = require('google-auth-library');
+// const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// @desc    Register user
+// @route   POST /api/auth/register
+// @access  Public
+const registerUser = async (req, res) => {
+  try {
+    const { name, email, password, phone, role = 'guest' } = req.body;
+
+    // Check if user already exists
+    const userExists = await User.findOne({ email });
+    if (userExists) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists with this email'
+      });
+    }
+
+    // Create user
+    const user = await User.create({
+      name,
+      email,
+      password,
+      phone,
+      role
+    });
+
+    // Generate verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    await VerificationToken.create({
+      user: user._id,
+      token: verificationToken,
+      type: 'email',
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
+    });
+
+    // Send verification email
+    // Use frontend URL for verification - the frontend will handle the API call
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const verificationUrl = `${frontendUrl}/auth/verify-email?token=${verificationToken}`;
+    console.log('Sending welcome email to:', user.email);
+    console.log('Verification URL:', verificationUrl);
+    
+    try {
+      const emailResult = await sendWelcomeEmail(user.email, user.name, verificationUrl);
+      console.log('Welcome email sent successfully:', emailResult);
+    } catch (emailError) {
+      console.error('Failed to send welcome email:', emailError);
+      // Don't fail the registration if email fails
+    }
+    
+    // User starts as unverified - they must verify their email
+    // user.isVerified = false; // This is the default value
+
+    // Generate JWT token
+    const token = user.generateAuthToken();
+
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully. Please check your email to verify your account before logging in.',
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified
+        },
+        token
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error registering user',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Login user
+// @route   POST /api/auth/login
+// @access  Public
+const loginUser = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Check if user exists
+    const user = await User.findOne({ email }).select('+password');
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check if password is correct
+    const isPasswordCorrect = await user.comparePassword(password);
+    if (!isPasswordCorrect) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check if account is active
+    if (user.accountStatus !== 'active') {
+      return res.status(401).json({
+        success: false,
+        message: 'Account is suspended or deactivated'
+      });
+    }
+
+    // Check if email is verified
+    if (!user.isVerified) {
+      return res.status(401).json({
+        success: false,
+        message: 'Please verify your email before logging in. Check your inbox for the verification link.'
+      });
+    }
+
+    // Generate JWT token
+    const token = user.generateAuthToken();
+
+    // Create session
+    await Session.create({
+      user: user._id,
+      token,
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ipAddress: req.ip || req.connection?.remoteAddress || 'unknown',
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified,
+          profileImage: user.profileImage
+        },
+        token
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error logging in',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Verify email
+// @route   GET /api/auth/verify-email/:token
+// @access  Public
+const verifyEmail = async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const verificationToken = await VerificationToken.findOne({
+      token,
+      type: 'email',
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!verificationToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired verification token'
+      });
+    }
+
+    // Update user
+    await User.findByIdAndUpdate(verificationToken.user, {
+      isVerified: true
+    });
+
+    // Delete verification token
+    await VerificationToken.findByIdAndDelete(verificationToken._id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Email verified successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error verifying email',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Forgot password
+// @route   POST /api/auth/forgot-password
+// @access  Public
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    await VerificationToken.create({
+      user: user._id,
+      token: resetToken,
+      type: 'password_reset',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000) // 1 hour
+    });
+
+    // Send reset email
+    // Use frontend URL for password reset - the frontend will handle the API call
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetUrl = `${frontendUrl}/auth/reset-password?token=${resetToken}`;
+    await sendPasswordResetEmail(user.email, user.name, resetUrl);
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset email sent'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error sending password reset email',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Reset password
+// @route   POST /api/auth/reset-password/:token
+// @access  Public
+const resetPassword = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.body;
+
+    const verificationToken = await VerificationToken.findOne({
+      token,
+      type: 'password_reset',
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!verificationToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired reset token'
+      });
+    }
+
+    // Update user password
+    const user = await User.findById(verificationToken.user);
+    user.password = password;
+    await user.save();
+
+    // Delete verification token
+    await VerificationToken.findByIdAndDelete(verificationToken._id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error resetting password',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Logout user
+// @route   POST /api/auth/logout
+// @access  Private
+const logoutUser = async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (token) {
+      // Delete session
+      await Session.findOneAndDelete({ token });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error logging out',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get current user
+// @route   GET /api/auth/me
+// @access  Private
+const getCurrentUser = async (req, res) => {
+  try {
+    // If req.user is an admin, return null for user (admins don't have regular user profiles)
+    if (req.isAdmin) {
+      return res.status(200).json({
+        success: true,
+        data: { user: null }
+      });
+    }
+
+    const user = await User.findById(req.user.id)
+      .select('-password')
+      .populate('savedListings', 'title images pricing');
+
+    res.status(200).json({
+      success: true,
+      data: { user }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching user data',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Update user profile
+// @route   PUT /api/auth/profile
+// @access  Private
+const updateProfile = async (req, res) => {
+  try {
+    const { name, phone, bio, languages, location } = req.body;
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      {
+        name,
+        phone,
+        bio,
+        languages,
+        location
+      },
+      { new: true, runValidators: true }
+    ).select('-password');
+
+    res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: { user }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error updating profile',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Change password
+// @route   PUT /api/auth/change-password
+// @access  Private
+const changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    const user = await User.findById(req.user.id).select('+password');
+
+    // Check current password
+    const isPasswordCorrect = await user.comparePassword(currentPassword);
+    if (!isPasswordCorrect) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Update password
+    user.password = newPassword;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error changing password',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Social login (Google/Facebook)
+// @route   POST /api/auth/social-login
+// @access  Public
+const socialLogin = async (req, res) => {
+  try {
+    const { provider, token } = req.body;
+    let user = null;
+
+    if (provider === 'google') {
+      try {
+        console.log('Attempting to verify Google token...');
+        console.log('Token length:', token ? token.length : 0);
+        console.log('Token preview:', token ? token.substring(0, 20) + '...' : 'No token');
+        
+        // Fetch user info using the access token
+        const googleApiUrl = `https://www.googleapis.com/oauth2/v2/userinfo?access_token=${token}`;
+        console.log('Calling Google API:', googleApiUrl);
+        
+        const userInfoResponse = await fetch(googleApiUrl);
+        
+        console.log('Google API response status:', userInfoResponse.status);
+        console.log('Google API response headers:', Object.fromEntries(userInfoResponse.headers.entries()));
+        
+        if (!userInfoResponse.ok) {
+          const errorText = await userInfoResponse.text();
+          console.error('Google API error response:', errorText);
+          return res.status(401).json({
+            success: false,
+            message: 'Invalid Google access token',
+            debug: process.env.NODE_ENV === 'development' ? errorText : undefined
+          });
+        }
+        
+        const userInfo = await userInfoResponse.json();
+        console.log('Google API user info received:', {
+          hasEmail: !!userInfo.email,
+          hasName: !!userInfo.name,
+          hasPicture: !!userInfo.picture,
+          hasId: !!userInfo.id
+        });
+        
+        const { email, name, picture, id: googleId } = userInfo;
+
+        // Check if user already exists
+        user = await User.findOne({ email });
+        
+        if (!user) {
+          // Create new user with a password that meets validation requirements
+          const generateSecurePassword = () => {
+            const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+            const lowercase = 'abcdefghijklmnopqrstuvwxyz';
+            const numbers = '0123456789';
+            const special = '!@#$%^&*()';
+            
+            let password = '';
+            password += uppercase[Math.floor(Math.random() * uppercase.length)]; // 1 uppercase
+            password += lowercase[Math.floor(Math.random() * lowercase.length)]; // 1 lowercase
+            password += numbers[Math.floor(Math.random() * numbers.length)]; // 1 number
+            password += special[Math.floor(Math.random() * special.length)]; // 1 special
+            
+            // Fill the rest with random characters to meet 12 character minimum
+            const allChars = uppercase + lowercase + numbers + special;
+            for (let i = 4; i < 12; i++) {
+              password += allChars[Math.floor(Math.random() * allChars.length)];
+            }
+            
+            // Shuffle the password
+            return password.split('').sort(() => Math.random() - 0.5).join('');
+          };
+          
+          const generatedPassword = generateSecurePassword();
+          console.log('Generated secure password for Google user:', generatedPassword.substring(0, 8) + '...');
+          
+          user = await User.create({
+            name: name || 'Google User',
+            email: email,
+            profileImage: picture || 'default.jpg',
+            isVerified: true,
+            password: generatedPassword,
+            'socialLogins.googleId': googleId,
+            role: 'guest'
+          });
+          
+          console.log('Google user created successfully:', user.email);
+        } else {
+          // Update existing user's Google ID if not set
+          if (!user.socialLogins?.googleId) {
+            user.socialLogins = user.socialLogins || {};
+            user.socialLogins.googleId = googleId;
+            await user.save();
+          }
+        }
+      } catch (googleError) {
+        console.error('Google API error details:', {
+          message: googleError.message,
+          stack: googleError.stack,
+          name: googleError.name
+        });
+        
+        // Check if it's a network error
+        if (googleError.code === 'ENOTFOUND' || googleError.code === 'ECONNREFUSED') {
+          return res.status(500).json({
+            success: false,
+            message: 'Network error: Unable to reach Google API. Please check your internet connection.'
+          });
+        }
+        
+        // Check if it's a fetch error
+        if (googleError.name === 'TypeError' && googleError.message.includes('fetch')) {
+          return res.status(500).json({
+            success: false,
+            message: 'Server error: Fetch API not available. Please contact support.'
+          });
+        }
+        
+        return res.status(401).json({
+          success: false,
+          message: 'Failed to verify Google token. Please try again.',
+          debug: process.env.NODE_ENV === 'development' ? googleError.message : undefined
+        });
+      }
+    } else {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Only Google login is supported.' 
+      });
+    }
+
+    if (!user) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Google login failed.' 
+      });
+    }
+
+    // Check if account is active
+    if (user.accountStatus !== 'active') {
+      return res.status(401).json({
+        success: false,
+        message: 'Account is suspended or deactivated'
+      });
+    }
+
+    // Check if email is verified
+    if (!user.isVerified) {
+      return res.status(401).json({
+        success: false,
+        message: 'Please verify your email before logging in. Check your inbox for the verification link.'
+      });
+    }
+
+    // Generate JWT token
+    const jwtToken = user.generateAuthToken();
+
+    // Create session
+    await Session.create({
+      user: user._id,
+      token: jwtToken,
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ipAddress: req.ip || req.connection?.remoteAddress || 'unknown',
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Google login successful',
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified,
+          profileImage: user.profileImage
+        },
+        token: jwtToken
+      }
+    });
+  } catch (error) {
+    console.error('Social login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error with Google login',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Resend verification email
+// @route   POST /api/auth/resend-verification
+// @access  Public
+const resendVerificationEmail = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (user.isVerified) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is already verified'
+      });
+    }
+
+    // Delete existing verification token
+    await VerificationToken.findOneAndDelete({
+      user: user._id,
+      type: 'email'
+    });
+
+    // Generate new verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    await VerificationToken.create({
+      user: user._id,
+      token: verificationToken,
+      type: 'email',
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
+    });
+
+    // Send verification email
+    // Use frontend URL for verification - the frontend will handle the API call
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const verificationUrl = `${frontendUrl}/auth/verify-email?token=${verificationToken}`;
+    await sendWelcomeEmail(user.email, user.name, verificationUrl);
+
+    res.status(200).json({
+      success: true,
+      message: 'Verification email sent successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error sending verification email',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Logout all devices
+// @route   POST /api/auth/logout-all
+// @access  Private
+const logoutAllDevices = async (req, res) => {
+  try {
+    // Delete all sessions for the user
+    await Session.deleteMany({ user: req.user.id });
+
+    res.status(200).json({
+      success: true,
+      message: 'Logged out from all devices successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error logging out from all devices',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Delete account
+// @route   DELETE /api/auth/account
+// @access  Private
+const deleteAccount = async (req, res) => {
+  try {
+    const { password } = req.body;
+
+    const user = await User.findById(req.user.id).select('+password');
+
+    // Check password
+    const isPasswordCorrect = await user.comparePassword(password);
+    if (!isPasswordCorrect) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password is incorrect'
+      });
+    }
+
+    // Delete user sessions
+    await Session.deleteMany({ user: req.user.id });
+
+    // Delete user
+    await User.findByIdAndDelete(req.user.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Account deleted successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting account',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Deactivate account
+// @route   POST /api/auth/deactivate
+// @access  Private
+const deactivateAccount = async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.user.id, {
+      accountStatus: 'deactivated'
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Account deactivated successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error deactivating account',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Reactivate account
+// @route   POST /api/auth/reactivate
+// @access  Private
+const reactivateAccount = async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.user.id, {
+      accountStatus: 'active'
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Account reactivated successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error reactivating account',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Enable 2FA
+// @route   POST /api/auth/2fa/enable
+// @access  Private
+const enable2FA = async (req, res) => {
+  try {
+    // TODO: Implement 2FA logic
+    res.status(200).json({
+      success: true,
+      message: '2FA enabled successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error enabling 2FA',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Disable 2FA
+// @route   POST /api/auth/2fa/disable
+// @access  Private
+const disable2FA = async (req, res) => {
+  try {
+    // TODO: Implement 2FA logic
+    res.status(200).json({
+      success: true,
+      message: '2FA disabled successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error disabling 2FA',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Verify 2FA
+// @route   POST /api/auth/2fa/verify
+// @access  Private
+const verify2FA = async (req, res) => {
+  try {
+    // TODO: Implement 2FA logic
+    res.status(200).json({
+      success: true,
+      message: '2FA verified successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error verifying 2FA',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get active sessions
+// @route   GET /api/auth/sessions
+// @access  Private
+const getActiveSessions = async (req, res) => {
+  try {
+    const sessions = await Session.find({ user: req.user.id })
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: { sessions }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching sessions',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Terminate session
+// @route   DELETE /api/auth/sessions/:sessionId
+// @access  Private
+const terminateSession = async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    const session = await Session.findOneAndDelete({
+      _id: sessionId,
+      user: req.user.id
+    });
+
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Session terminated successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error terminating session',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Validate reset password token
+// @route   GET /api/auth/reset-password/:token
+// @access  Public
+const validateResetToken = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const verificationToken = await VerificationToken.findOne({
+      token,
+      type: 'password_reset',
+      expiresAt: { $gt: new Date() }
+    });
+    if (!verificationToken) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
+    }
+    res.status(200).json({ success: true, message: 'Valid token' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error validating token', error: error.message });
+  }
+};
+
+module.exports = {
+  registerUser,
+  loginUser,
+  verifyEmail,
+  forgotPassword,
+  resetPassword,
+  logoutUser,
+  getCurrentUser,
+  updateProfile,
+  changePassword,
+  socialLogin,
+  resendVerificationEmail,
+  logoutAllDevices,
+  deleteAccount,
+  deactivateAccount,
+  reactivateAccount,
+  enable2FA,
+  disable2FA,
+  verify2FA,
+  getActiveSessions,
+  terminateSession,
+  validateResetToken
+};
