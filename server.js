@@ -64,7 +64,9 @@ const rateLimiters = createRateLimiters();
 
 // CORS configuration
 const corsOptions = {
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['ALLOWED_ORIGINS=https://tripme-frontend.vercel.app','https://www.tripme-frontend.vercel.app'],
+  origin: process.env.ALLOWED_ORIGINS ? 
+    process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()).filter(url => url) : 
+    ['https://tripme-frontend.vercel.app', 'https://www.tripme-frontend.vercel.app'],
   credentials: true,
   optionsSuccessStatus: 200
 };
