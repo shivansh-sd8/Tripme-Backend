@@ -6,27 +6,131 @@ const Coupon = require('../models/Coupon');
 const Refund = require('../models/Refund');
 const Notification = require('../models/Notification');
 const PaymentService = require('../services/payment.service');
+const { 
+  verifyPaymentAmount, 
+  validateBookingParameters,
+  paymentRateLimit,
+  paymentSessionManager,
+  generateIdempotencyKey,
+  verifyWebhookSignature
+} = require('../utils/paymentSecurity');
 
 // @desc    Process payment (enhanced with fee calculation)
 // @route   POST /api/payments/process
 // @access  Private
 const processPayment = async (req, res) => {
   try {
-    const { bookingId, paymentMethod, couponCode, ipAddress, userAgent } = req.body;
+    const { bookingId, paymentMethod, couponCode, ipAddress, userAgent, paymentData, idempotencyKey } = req.body;
+    
+    // Rate limiting check
+    if (!paymentRateLimit.isAllowed(req.user._id)) {
+      const remainingAttempts = paymentRateLimit.getRemainingAttempts(req.user._id);
+      return res.status(429).json({ 
+        success: false, 
+        message: 'Too many payment attempts. Please try again later.',
+        remainingAttempts,
+        retryAfter: 15 * 60 // 15 minutes in seconds
+      });
+    }
+    
+    // Validate idempotency key
+    if (!idempotencyKey) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Idempotency key is required for payment processing' 
+      });
+    }
+    
+    // Check for duplicate payment with same idempotency key
+    const existingPayment = await Payment.findOne({ 
+      'metadata.idempotencyKey': idempotencyKey,
+      user: req.user._id
+    });
+    
+    if (existingPayment) {
+      return res.status(409).json({ 
+        success: false, 
+        message: 'Payment with this idempotency key already exists',
+        paymentId: existingPayment._id
+      });
+    }
     
     const booking = await Booking.findById(bookingId);
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
     
-    if (booking.user.toString() !== req.user.id) {
-      return res.status(403).json({ success: false, message: 'Not authorized to pay for this booking' });
+    // Verify user owns the booking
+    if (booking.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You are not authorized to pay for this booking' 
+      });
     }
     
-    const existingPayment = await Payment.findOne({ booking: bookingId });
-    if (existingPayment) {
-      return res.status(400).json({ success: false, message: 'Payment already exists for this booking' });
+    // Validate booking parameters for security
+    const bookingValidation = validateBookingParameters({
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+      guests: booking.guests,
+      basePrice: booking.listing?.pricing?.basePrice || booking.service?.pricing?.basePrice,
+      hourlyExtension: booking.hourlyExtension
+    });
+    
+    if (!bookingValidation.isValid) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid booking parameters',
+        errors: bookingValidation.errors
+      });
     }
+    
+    // Verify payment amount if provided
+    if (paymentData) {
+      const amountVerification = verifyPaymentAmount(paymentData, {
+        basePrice: booking.listing?.pricing?.basePrice || booking.service?.pricing?.basePrice || 0,
+        nights: booking.bookingDuration === 'daily' ? 
+          Math.ceil((new Date(booking.checkOut) - new Date(booking.checkIn)) / (1000 * 60 * 60 * 24)) : 1,
+        cleaningFee: booking.cleaningFee || 0,
+        serviceFee: booking.serviceFee || 0,
+        securityDeposit: booking.securityDeposit || 0,
+        extraGuestPrice: booking.listing?.pricing?.extraGuestPrice || booking.service?.pricing?.perPersonPrice || 0,
+        extraGuests: booking.guests?.adults > 1 ? booking.guests.adults - 1 : 0,
+        hourlyExtension: booking.hourlyExtension?.cost || 0,
+        discountAmount: booking.discountAmount || 0,
+        currency: booking.currency || 'INR'
+      });
+      
+      if (!amountVerification.isValid) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Payment amount verification failed',
+          errors: amountVerification.errors,
+          expectedAmount: amountVerification.expectedAmount,
+          actualAmount: amountVerification.actualAmount
+        });
+      }
+    }
+    
+    // Check if payment already exists for this booking
+    const existingBookingPayment = await Payment.findOne({ booking: bookingId });
+    if (existingBookingPayment) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Payment already exists for this booking',
+        paymentId: existingBookingPayment._id,
+        status: existingBookingPayment.status
+      });
+    }
+    
+    // Create payment session for tracking
+    const sessionId = paymentSessionManager.createSession({
+      bookingId,
+      userId: req.user._id,
+      paymentMethod,
+      amount: booking.totalAmount,
+      currency: booking.currency
+    });
     
     // Apply coupon if provided
     let coupon = null;
@@ -41,13 +145,14 @@ const processPayment = async (req, res) => {
       if (coupon) {
         const hasUsed = coupon.usedBy.some(usage => usage.user.toString() === req.user.id);
         if (!hasUsed) {
-          if (coupon.discountType === 'percentage') {
-            const discount = (booking.totalAmount * coupon.amount) / 100;
-            const maxDiscount = coupon.maxDiscount || discount;
-            booking.discountAmount = Math.min(discount, maxDiscount);
-          } else {
-            booking.discountAmount = coupon.amount;
-          }
+        if (coupon.discountType === 'percentage') {
+          // Apply discount to subtotal, not total amount
+          const discount = (booking.subtotal * coupon.amount) / 100;
+          const maxDiscount = coupon.maxDiscount || discount;
+          booking.discountAmount = Math.min(discount, maxDiscount);
+        } else {
+          booking.discountAmount = coupon.amount;
+        }
           booking.couponApplied = coupon._id;
           coupon.usedCount += 1;
           coupon.usedBy.push({ user: req.user.id, usedAt: new Date() });
@@ -56,18 +161,35 @@ const processPayment = async (req, res) => {
       }
     }
     
-    // Process payment using PaymentService
-    const paymentData = {
+    // Process payment using PaymentService with enhanced security
+    const paymentServiceData = {
       paymentMethod,
       transactionId: `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       gateway: 'mock', // TODO: Integrate with actual payment gateway
       gatewayResponse: { status: 'success' },
-      ipAddress,
-      userAgent,
-      source: 'web'
+      ipAddress: ipAddress || req.ip,
+      userAgent: userAgent || req.get('User-Agent'),
+      source: 'web',
+      sessionId,
+      idempotencyKey,
+      securityMetadata: {
+        userAgent: req.get('User-Agent'),
+        ipAddress: req.ip,
+        forwardedFor: req.get('X-Forwarded-For'),
+        realIp: req.get('X-Real-IP'),
+        referer: req.get('Referer'),
+        origin: req.get('Origin'),
+        timestamp: new Date().toISOString()
+      }
     };
     
-    const { payment, feeBreakdown } = await PaymentService.processPayment(bookingId, paymentData, req.user);
+    const { payment, feeBreakdown } = await PaymentService.processPayment(bookingId, paymentServiceData, req.user);
+    
+    // Update booking status to confirmed after successful payment
+    booking.status = 'confirmed';
+    booking.paymentStatus = 'paid';
+    await booking.save();
+    console.log(`✅ Booking ${bookingId} confirmed after payment processing`);
     
     // Update availability status to 'booked' after successful payment
     try {
@@ -116,6 +238,16 @@ const confirmPayment = async (req, res) => {
     // For now, just confirm the payment
     payment.status = 'completed';
     await payment.save();
+    
+    // Update booking status to confirmed
+    if (payment.booking) {
+      const Booking = require('../models/Booking');
+      await Booking.findByIdAndUpdate(payment.booking, {
+        status: 'confirmed',
+        paymentStatus: 'paid'
+      });
+      console.log(`✅ Booking ${payment.booking} confirmed after payment`);
+    }
     
     res.status(200).json({ 
       success: true, 
@@ -634,18 +766,117 @@ const setDefaultPaymentMethod = async (req, res) => {
   }
 };
 
-// @desc    Payment webhooks (mock)
+// @desc    Payment webhooks (enhanced security)
 // @route   POST /api/payments/webhook/stripe
 // @access  Public
 const stripeWebhook = async (req, res) => {
   try {
+    const signature = req.get('stripe-signature');
+    const payload = JSON.stringify(req.body);
+    
+    // Verify webhook signature (when real Stripe is integrated)
+    if (process.env.STRIPE_WEBHOOK_SECRET) {
+      const isValidSignature = verifyWebhookSignature(
+        payload, 
+        signature, 
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+      
+      if (!isValidSignature) {
+        console.error('❌ Invalid webhook signature');
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Invalid webhook signature' 
+        });
+      }
+    }
+    
+    // Log webhook for security audit
+    console.log('🔒 Webhook received:', {
+      timestamp: new Date().toISOString(),
+      signature: signature ? 'present' : 'missing',
+      payload: req.body,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+    
+    // Process webhook based on event type
+    const event = req.body;
+    
+    switch (event.type) {
+      case 'payment_intent.succeeded':
+        await handlePaymentSuccess(event.data.object);
+        break;
+      case 'payment_intent.payment_failed':
+        await handleWebhookPaymentFailure(event.data.object);
+        break;
+      default:
+        console.log(`Unhandled event type: ${event.type}`);
+    }
+    
     res.status(200).json({ received: true });
   } catch (error) {
+    console.error('❌ Webhook processing error:', error);
     res.status(500).json({
       success: false,
       message: 'Error processing webhook',
       error: error.message
     });
+  }
+};
+
+// Handle successful payment
+const handlePaymentSuccess = async (paymentIntent) => {
+  try {
+    const payment = await Payment.findOne({ 
+      'paymentDetails.transactionId': paymentIntent.id 
+    });
+    
+    if (payment) {
+      payment.status = 'completed';
+      payment.processedAt = new Date();
+      payment.paymentDetails.gatewayResponse = paymentIntent;
+      await payment.save();
+      
+      // Update booking status
+      const booking = await Booking.findById(payment.booking);
+      if (booking) {
+        booking.paymentStatus = 'paid';
+        booking.status = 'confirmed';
+        await booking.save();
+      }
+      
+      console.log('✅ Payment confirmed:', payment._id);
+    }
+  } catch (error) {
+    console.error('❌ Error handling payment success:', error);
+  }
+};
+
+// Handle failed payment (webhook helper)
+const handleWebhookPaymentFailure = async (paymentIntent) => {
+  try {
+    const payment = await Payment.findOne({ 
+      'paymentDetails.transactionId': paymentIntent.id 
+    });
+    
+    if (payment) {
+      payment.status = 'failed';
+      payment.paymentDetails.gatewayResponse = paymentIntent;
+      await payment.save();
+      
+      // Update booking status
+      const booking = await Booking.findById(payment.booking);
+      if (booking) {
+        booking.paymentStatus = 'failed';
+        booking.status = 'cancelled';
+        await booking.save();
+      }
+      
+      console.log('❌ Payment failed:', payment._id);
+    }
+  } catch (error) {
+    console.error('❌ Error handling payment failure:', error);
   }
 };
 

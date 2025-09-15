@@ -6,13 +6,13 @@ const Property = require('../models/Property');
 // @access  Private
 const cleanupExpiredBlockedAvailability = async () => {
   try {
-    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+    const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
     
-    // Find all blocked availability records that are older than 15 minutes
+    // Find all blocked availability records that are older than 3 minutes
     // and haven't been confirmed as booked
     const expiredBlockedRecords = await Availability.find({
       status: 'blocked',
-      blockedAt: { $lt: fifteenMinutesAgo }
+      blockedAt: { $lt: threeMinutesAgo }
     });
     
     if (expiredBlockedRecords.length === 0) {
@@ -23,7 +23,7 @@ const cleanupExpiredBlockedAvailability = async () => {
     const result = await Availability.updateMany(
       {
         status: 'blocked',
-        blockedAt: { $lt: fifteenMinutesAgo }
+        blockedAt: { $lt: threeMinutesAgo }
       },
       {
         $set: {

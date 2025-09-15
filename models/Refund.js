@@ -39,7 +39,7 @@ const refundSchema = new Schema({
   },
   type: {
     type: String,
-    enum: ['full', 'partial', 'service_fee_only', 'cleaning_fee_only'],
+    enum: ['full', 'partial', 'service_fee_only', 'cleaning_fee_only', 'security_deposit_only'],
     required: true
   },
   status: {
@@ -66,13 +66,31 @@ const refundSchema = new Schema({
     type: String,
     default: '3-5 business days'
   },
-  // For partial refunds
+  // Complete refund breakdown for consistency
   refundBreakdown: {
+    // Base amounts
     baseAmount: Number,
-    serviceFee: Number,
+    extraGuestCost: Number,
+    hourlyExtension: Number,
+    
+    // Host-set fees
     cleaningFee: Number,
-    taxes: Number,
-    platformFee: Number
+    serviceFee: Number,
+    securityDeposit: Number,
+    
+    // Platform fees
+    platformFee: Number,
+    processingFee: Number,
+    gst: Number,
+    
+    // Discounts
+    discountAmount: Number,
+    
+    // Calculated amounts
+    subtotal: Number,
+    totalAmount: Number,
+    hostEarning: Number,
+    platformRevenue: Number
   }
 }, { 
   timestamps: true,

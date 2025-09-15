@@ -152,6 +152,59 @@ const validateListing = (req, res, next) => {
           'number.max': 'Monthly discount cannot exceed 100%'
         })
     }).required(),
+    hourlyBooking: Joi.object({
+      enabled: Joi.boolean()
+        .default(false)
+        .messages({
+          'boolean.base': 'Hourly booking enabled must be a boolean'
+        }),
+      minStayDays: Joi.number()
+        .min(1)
+        .max(30)
+        .default(1)
+        .messages({
+          'number.min': 'Minimum stay days must be at least 1',
+          'number.max': 'Minimum stay days cannot exceed 30'
+        }),
+      hourlyRates: Joi.object({
+        sixHours: Joi.number()
+          .min(0)
+          .max(1)
+          .default(0.30)
+          .messages({
+            'number.min': '6-hour rate cannot be negative',
+            'number.max': '6-hour rate cannot exceed 100%'
+          }),
+        twelveHours: Joi.number()
+          .min(0)
+          .max(1)
+          .default(0.60)
+          .messages({
+            'number.min': '12-hour rate cannot be negative',
+            'number.max': '12-hour rate cannot exceed 100%'
+          }),
+        eighteenHours: Joi.number()
+          .min(0)
+          .max(1)
+          .default(0.75)
+          .messages({
+            'number.min': '18-hour rate cannot be negative',
+            'number.max': '18-hour rate cannot exceed 100%'
+          })
+      }).default({
+        sixHours: 0.30,
+        twelveHours: 0.60,
+        eighteenHours: 0.75
+      })
+    }).default({
+      enabled: false,
+      minStayDays: 1,
+      hourlyRates: {
+        sixHours: 0.30,
+        twelveHours: 0.60,
+        eighteenHours: 0.75
+      }
+    }),
     location: Joi.object({
       type: Joi.string()
         .valid('Point')
@@ -176,6 +229,15 @@ const validateListing = (req, res, next) => {
           'string.min': 'Address must be at least 10 characters long',
           'string.max': 'Address cannot exceed 500 characters',
           'any.required': 'Address is required'
+        }),
+      userAddress: Joi.string()
+        .min(10)
+        .max(1000)
+        .required()
+        .messages({
+          'string.min': 'User address must be at least 10 characters long',
+          'string.max': 'User address cannot exceed 1000 characters',
+          'any.required': 'User address is required'
         }),
       city: Joi.string()
         .min(2)
@@ -485,6 +547,14 @@ const validateListingUpdate = (req, res, next) => {
         .messages({
           'string.min': 'Address must be at least 10 characters long',
           'string.max': 'Address cannot exceed 500 characters'
+        }),
+      userAddress: Joi.string()
+        .min(10)
+        .max(1000)
+        .optional()
+        .messages({
+          'string.min': 'User address must be at least 10 characters long',
+          'string.max': 'User address cannot exceed 1000 characters'
         }),
       city: Joi.string()
         .min(2)

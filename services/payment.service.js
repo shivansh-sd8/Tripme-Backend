@@ -4,6 +4,8 @@ const Refund = require('../models/Refund');
 const Booking = require('../models/Booking');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const PaymentAuditLog = require('../models/PaymentAuditLog');
+const { calculatePricingBreakdown, validatePricingConsistency, toTwoDecimals } = require('../utils/pricingUtils');
 
 class PaymentService {
   /**
@@ -23,17 +25,17 @@ class PaymentService {
     // Calculate taxes
     const taxes = Math.round(subtotal * taxRate * 100) / 100;
     
-    // Calculate platform fee
+    // Calculate TripMe service fee
     const platformFee = Math.round(subtotal * platformFeeRate * 100) / 100;
     
     // Calculate processing fee
     const processingFee = Math.round((subtotal * processingFeeRate + processingFeeFixed) * 100) / 100;
     
-    // Calculate host earning
+    // Calculate host earning (subtotal minus TripMe service fee)
     const hostEarning = Math.round((subtotal - platformFee) * 100) / 100;
     
-    // Calculate total amount
-    const totalAmount = subtotal + taxes + cleaningFee + securityDeposit;
+    // Calculate total amount (customer pays subtotal + TripMe service fee + GST + processing fee)
+    const totalAmount = subtotal + platformFee + taxes + processingFee;
     
     return {
       subtotal,
@@ -57,9 +59,11 @@ class PaymentService {
   }
 
   /**
-   * Process a payment for a booking
+   * Process a payment for a booking with comprehensive validation
    */
   static async processPayment(bookingId, paymentData, user) {
+    const startTime = Date.now();
+    
     try {
       const booking = await Booking.findById(bookingId)
         .populate('listing')
@@ -70,12 +74,88 @@ class PaymentService {
         throw new Error('Booking not found');
       }
 
-      // Calculate fees
-      const feeBreakdown = this.calculateFees({
-        subtotal: booking.totalAmount,
+      // CRITICAL: Always recalculate pricing server-side for validation
+      console.log('🔄 Recalculating pricing server-side for validation...');
+      
+      // Extract pricing parameters from booking
+      const pricingParams = {
+        basePrice: booking.listing?.pricing?.basePrice || booking.service?.pricing?.basePrice || 0,
+        nights: booking.bookingType === 'property' ? 
+          Math.ceil((new Date(booking.checkOut) - new Date(booking.checkIn)) / (1000 * 60 * 60 * 24)) : 1,
         cleaningFee: booking.cleaningFee || 0,
-        securityDeposit: booking.securityDeposit || 0
-      });
+        serviceFee: booking.serviceFee || 0,
+        securityDeposit: booking.securityDeposit || 0,
+        extraGuestPrice: booking.listing?.pricing?.extraGuestPrice || booking.service?.pricing?.perPersonPrice || 0,
+        extraGuests: booking.guests?.adults > 1 ? booking.guests.adults - 1 : 0,
+        hourlyExtension: booking.hourlyExtension?.cost || 0,
+        discountAmount: booking.discountAmount || 0,
+        currency: booking.currency || 'INR'
+      };
+
+      // Recalculate pricing using current platform fee rate
+      const backendPricing = await calculatePricingBreakdown(pricingParams);
+      
+      // Get frontend pricing from payment data for comparison
+      const frontendPricing = paymentData.pricingBreakdown || {
+        subtotal: paymentData.subtotal || 0,
+        platformFee: paymentData.platformFee || 0,
+        gst: paymentData.gst || 0,
+        processingFee: paymentData.processingFee || 0,
+        totalAmount: paymentData.amount || 0
+      };
+
+      // Validate pricing consistency
+      const validation = validatePricingConsistency(frontendPricing, backendPricing);
+      
+      if (!validation.isValid) {
+        console.error('❌ PRICING VALIDATION FAILED:', validation.errors);
+        
+        // Log the validation failure
+        await PaymentAuditLog.logPaymentCalculation({
+          paymentId: null, // Will be set after payment creation
+          bookingId: bookingId,
+          userId: user._id,
+          hostId: booking.host._id,
+          inputParameters: pricingParams,
+          frontendCalculation: frontendPricing,
+          backendCalculation: backendPricing,
+          validation: validation,
+          rateInfo: {
+            requestedRate: frontendPricing.platformFeeRate || 0.15,
+            appliedRate: backendPricing.platformFeeRate,
+            rateSource: 'database',
+            rateFetchedAt: new Date()
+          },
+          security: {
+            ipAddress: paymentData.ipAddress,
+            userAgent: paymentData.userAgent,
+            sessionId: paymentData.sessionId,
+            idempotencyKey: paymentData.idempotencyKey,
+            requestId: paymentData.requestId
+          },
+          audit: {
+            action: 'validation_failed',
+            reason: 'Frontend and backend pricing calculations do not match',
+            severity: 'critical'
+          }
+        });
+        
+        throw new Error(`ERR_PRICE_MISMATCH: Frontend and backend pricing calculations do not match. Errors: ${JSON.stringify(validation.errors)}`);
+      }
+
+      console.log('✅ Pricing validation passed - frontend and backend calculations match');
+
+      // Use backend calculation for payment (most current and accurate)
+      const feeBreakdown = {
+        subtotal: backendPricing.subtotal,
+        taxes: backendPricing.gst,
+        cleaningFee: backendPricing.cleaningFee,
+        securityDeposit: backendPricing.securityDeposit,
+        platformFee: backendPricing.platformFee,
+        processingFee: backendPricing.processingFee,
+        hostEarning: backendPricing.hostEarning,
+        totalAmount: backendPricing.totalAmount
+      };
 
       // Create payment record
       const payment = await Payment.create({
@@ -85,16 +165,18 @@ class PaymentService {
         amount: feeBreakdown.totalAmount,
         subtotal: feeBreakdown.subtotal,
         taxes: feeBreakdown.taxes,
-        serviceFee: 0, // Service fee is included in platform fee
+        gst: feeBreakdown.taxes, // GST is the same as taxes
+        serviceFee: backendPricing.serviceFee,
         cleaningFee: feeBreakdown.cleaningFee,
         securityDeposit: feeBreakdown.securityDeposit,
+        processingFee: feeBreakdown.processingFee,
         paymentMethod: paymentData.paymentMethod,
         paymentDetails: {
           transactionId: paymentData.transactionId || `TXN_${Date.now()}`,
           paymentGateway: paymentData.gateway || 'mock',
           gatewayResponse: paymentData.gatewayResponse
         },
-        status: 'completed',
+        status: 'processing', // Will be updated after verification
         commission: {
           platformFee: feeBreakdown.platformFee,
           hostEarning: feeBreakdown.hostEarning,
@@ -103,6 +185,8 @@ class PaymentService {
         currency: booking.currency || 'INR',
         coupon: booking.couponApplied,
         discountAmount: booking.discountAmount || 0,
+        // Store complete pricing breakdown for audit
+        pricingBreakdown: backendPricing.breakdown,
         metadata: {
           ipAddress: paymentData.ipAddress,
           userAgent: paymentData.userAgent,
@@ -110,9 +194,39 @@ class PaymentService {
         }
       });
 
-      // Update booking
-      booking.paymentStatus = 'paid';
-      booking.status = 'confirmed';
+      // Log successful payment calculation
+      await PaymentAuditLog.logPaymentCalculation({
+        paymentId: payment._id,
+        bookingId: bookingId,
+        userId: user._id,
+        hostId: booking.host._id,
+        inputParameters: pricingParams,
+        frontendCalculation: frontendPricing,
+        backendCalculation: backendPricing,
+        validation: validation,
+        rateInfo: {
+          requestedRate: frontendPricing.platformFeeRate || 0.15,
+          appliedRate: backendPricing.platformFeeRate,
+          rateSource: 'database',
+          rateFetchedAt: new Date()
+        },
+        security: {
+          ipAddress: paymentData.ipAddress,
+          userAgent: paymentData.userAgent,
+          sessionId: paymentData.sessionId,
+          idempotencyKey: paymentData.idempotencyKey,
+          requestId: paymentData.requestId
+        },
+        audit: {
+          action: 'payment_created',
+          reason: 'Payment created successfully with validated pricing',
+          severity: 'low'
+        }
+      });
+
+      // Update booking (but keep as pending until payment is verified)
+      booking.paymentStatus = 'pending'; // Will be updated after payment verification
+      booking.status = 'pending'; // Will be updated after payment verification
       booking.platformFee = feeBreakdown.platformFee;
       booking.hostFee = feeBreakdown.hostEarning;
       await booking.save();
@@ -123,8 +237,19 @@ class PaymentService {
       // Send notifications
       await this.sendPaymentNotifications(payment, booking, user);
 
+      // Update audit log with processing time
+      const processingTime = Date.now() - startTime;
+      await PaymentAuditLog.updatePaymentStatus(payment._id, 'completed', { processingTimeMs: processingTime });
+
       return { payment, feeBreakdown };
     } catch (error) {
+      // Log payment failure
+      if (bookingId) {
+        await PaymentAuditLog.updatePaymentStatus(bookingId, 'failed', { 
+          rejectionReason: error.message 
+        });
+      }
+      
       throw new Error(`Payment processing failed: ${error.message}`);
     }
   }

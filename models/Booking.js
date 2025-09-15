@@ -24,6 +24,26 @@ const bookingSchema = new mongoose.Schema({
     enum: ['property', 'service'],
     required: true
   },
+  bookingDuration: {
+    type: String,
+    enum: ['daily', 'hourly'],
+    default: 'daily'
+  },
+  hourlyExtension: {
+    hours: {
+      type: Number,
+      enum: [6, 12, 18],
+      default: null
+    },
+    rate: {
+      type: Number,
+      default: 0
+    },
+    totalHours: {
+      type: Number,
+      default: 0
+    }
+  },
   status: {
     type: String,
     enum: ['pending', 'accepted', 'rejected', 'confirmed', 'cancelled', 'completed', 'expired'],
@@ -37,11 +57,11 @@ const bookingSchema = new mongoose.Schema({
   },
   checkInTime: {
     type: String,
-    default: '11:00'
+    default: '15:00'
   },
   checkOutTime: {
     type: String,
-    default: '10:00'
+    default: '11:00'
   },
   timeSlot: {
     startTime: Date,
@@ -62,6 +82,10 @@ const bookingSchema = new mongoose.Schema({
     }
   },
   totalAmount: {
+    type: Number,
+    required: true
+  },
+  subtotal: {
     type: Number,
     required: true
   },
@@ -92,6 +116,24 @@ const bookingSchema = new mongoose.Schema({
   specialRequests: {
     type: String,
     maxlength: [500, 'Special requests cannot exceed 500 characters']
+  },
+  contactInfo: {
+    name: {
+      type: String,
+      required: true,
+      minlength: [2, 'Contact name must be at least 2 characters'],
+      maxlength: [100, 'Contact name cannot exceed 100 characters']
+    },
+    phone: {
+      type: String,
+      required: true,
+      match: [/^\+?[\d\s\-\(\)]+$/, 'Please provide a valid phone number']
+    },
+    email: {
+      type: String,
+      required: true,
+      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address']
+    }
   },
   paymentStatus: {
     type: String,
@@ -159,6 +201,46 @@ const bookingSchema = new mongoose.Schema({
   platformFee: {
     type: Number,
     default: 0
+  },
+  processingFee: {
+    type: Number,
+    default: 0
+  },
+  gst: {
+    type: Number,
+    default: 0
+  },
+  pricingBreakdown: {
+    customerBreakdown: {
+      baseAmount: Number,
+      cleaningFee: Number,
+      serviceFee: Number,
+      securityDeposit: Number,
+      hourlyExtension: Number,
+      discountAmount: Number,
+      subtotal: Number,
+      platformFee: Number,
+      gst: Number,
+      processingFee: Number,
+      totalAmount: Number
+    },
+    hostBreakdown: {
+      baseAmount: Number,
+      cleaningFee: Number,
+      serviceFee: Number,
+      securityDeposit: Number,
+      hourlyExtension: Number,
+      discountAmount: Number,
+      subtotal: Number,
+      platformFee: Number,
+      hostEarning: Number
+    },
+    platformBreakdown: {
+      platformFee: Number,
+      processingFee: Number,
+      gst: Number,
+      platformRevenue: Number
+    }
   }
 }, {
   timestamps: true,

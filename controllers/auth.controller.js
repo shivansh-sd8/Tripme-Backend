@@ -890,9 +890,99 @@ const validateResetToken = async (req, res) => {
   }
 };
 
+// @desc    Admin login
+// @route   POST /api/admin/login
+// @access  Public
+const adminLogin = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Check if admin exists
+    const admin = await Admin.findOne({ email }).select('+password');
+    if (!admin) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check if password is correct
+    const isPasswordCorrect = await admin.comparePassword(password);
+    if (!isPasswordCorrect) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check if admin account is active
+    if (!admin.isActive) {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin account is suspended or deactivated'
+      });
+    }
+
+    // Generate JWT token for admin
+    const token = jwt.sign(
+      { 
+        id: admin._id, 
+        email: admin.email, 
+        role: 'admin',
+        name: admin.name
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Create session
+    await Session.create({
+      user: admin._id,
+      token,
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ipAddress: req.ip || req.connection?.remoteAddress || 'unknown',
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+    });
+
+    // Remove password from response
+    const adminData = {
+      _id: admin._id,
+      name: admin.name,
+      email: admin.email,
+      role: 'admin',
+      isActive: admin.isActive,
+      lastLogin: admin.lastLogin,
+      createdAt: admin.createdAt
+    };
+
+    // Update last login
+    admin.lastLogin = new Date();
+    await admin.save();
+
+    console.log(`✅ Admin login successful: ${admin.email}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Admin login successful',
+      data: {
+        admin: adminData,
+        token
+      }
+    });
+
+  } catch (error) {
+    console.error('Admin login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during admin login'
+    });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
+  adminLogin,
   verifyEmail,
   forgotPassword,
   resetPassword,

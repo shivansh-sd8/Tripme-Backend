@@ -121,6 +121,16 @@ const getServices = async (req, res) => {
         }
       };
     }
+    
+    // Filter by city for services
+    if (req.query.city) {
+      query['location.city'] = req.query.city;
+    }
+    
+    // Also support location.city for backward compatibility
+    if (req.query['location.city']) {
+      query['location.city'] = req.query['location.city'];
+    }
 
     // Filter by group size
     if (groupSize) {

@@ -1,223 +1,79 @@
 const express = require('express');
 const router = express.Router();
-const {
-  adminSignup,
-  adminLogin,
-  getDashboardStats,
-  getAllUsers,
-  getUserDetails,
-  updateUserStatus,
-  testEmail,
-  getAllKYC,
-  getKYCDetails,
-  getPendingKYC,
-  verifyKYC,
-  getAllProperties,
-  getPendingProperties,
-  approveProperty,
-  getAllBookings,
-  getSystemAnalytics,
-  getAdminProfile,
-  updateAdminProfile,
-  getAllHosts,
-  approveHost,
-  rejectHost,
-  getAllPayments,
-  processManualPayout,
-  getAllReviews,
-  flagReview,
-  deleteReview,
-  getRecentActivities,
-  getSystemHealth
-} = require('../controllers/admin.controller');
+const { protect } = require('../middlewares/auth.middleware');
+const { isAdmin } = require('../middlewares/authorization.middleware');
+const authController = require('../controllers/auth.controller');
+const { validateLogin } = require('../validations/auth.validation');
 
-const { protect, adminOnly } = require('../middlewares/auth.middleware');
-const {
-  adminRateLimit,
-  sensitiveAdminRateLimit,
-  adminLoginRateLimit,
-  enhancedAdminAuth,
-  validateAdminInput,
-  auditLog,
-  requestSizeLimit,
-  securityHeaders,
-  ipWhitelist,
-  require2FA
-} = require('../middlewares/security.middleware');
+// Import admin controllers
+const adminController = require('../controllers/admin.controller');
 
-// Admin signup (for initial setup only)
-router.post('/signup', 
-  validateAdminInput,
-  requestSizeLimit,
-  securityHeaders,
-  auditLog('admin_signup'),
-  adminSignup
-);
+// Public admin routes (no authentication required)
+router.post('/login', validateLogin, authController.adminLogin);
+router.get('/pricing/platform-fee/public', adminController.getCurrentPlatformFeeRate);
 
-// Admin authentication with enhanced security
-router.post('/login', 
-  adminLoginRateLimit,
-  validateAdminInput,
-  requestSizeLimit,
-  securityHeaders,
-  auditLog('admin_login'),
-  adminLogin
-);
+// Apply admin authentication to all other routes
+router.use(protect);
+router.use(isAdmin);
 
-// Protected admin routes with enhanced security
-router.use(enhancedAdminAuth);
-router.use(securityHeaders);
-router.use(validateAdminInput);
-router.use(requestSizeLimit);
-router.use(adminRateLimit);
+// Dashboard routes
+router.get('/dashboard/stats', adminController.getDashboardStats);
 
-// Dashboard and analytics
-router.get('/dashboard', 
-  auditLog('view_dashboard'),
-  getDashboardStats
-);
-router.get('/dashboard/stats', 
-  auditLog('view_dashboard_stats'),
-  getDashboardStats
-);
-router.get('/analytics', 
-  auditLog('view_analytics'),
-  getSystemAnalytics
-);
+// Platform fee management routes
+router.get('/pricing/platform-fee', adminController.getCurrentPlatformFeeRate);
+router.put('/pricing/platform-fee', adminController.updatePlatformFeeRate);
+router.get('/pricing/platform-fee/history', adminController.getPlatformFeeHistory);
 
-// Recent activities and system health
-router.get('/activities/recent', 
-  auditLog('view_recent_activities'),
-  getRecentActivities
-);
-router.get('/system/health', 
-  auditLog('view_system_health'),
-  getSystemHealth
-);
+// User management routes
+router.get('/users', adminController.getUsers);
+router.put('/users/:userId/status', adminController.updateUserStatus);
+router.get('/users/:userId', adminController.getUser);
+router.put('/users/:userId', adminController.updateUser);
 
-// User management
-router.get('/users', 
-  auditLog('view_users'),
-  getAllUsers
-);
-router.get('/users/:id', 
-  auditLog('view_user_details'),
-  getUserDetails
-);
-router.put('/users/:id/status', 
-  sensitiveAdminRateLimit,
-  auditLog('update_user_status'),
-  require2FA,
-  updateUserStatus
-);
+// Host management routes
+router.get('/hosts', adminController.getHosts);
+router.put('/hosts/:hostId/approve', adminController.approveHost);
+router.put('/hosts/:hostId/reject', adminController.rejectHost);
 
-// KYC management
-router.get('/kyc', 
-  auditLog('view_kyc'),
-  getAllKYC
-);
-router.get('/kyc/pending', 
-  auditLog('view_pending_kyc'),
-  getPendingKYC
-);
-router.get('/kyc/:userId', 
-  auditLog('view_kyc_details'),
-  getKYCDetails
-);
-router.put('/kyc/:userId/verify', 
-  sensitiveAdminRateLimit,
-  auditLog('verify_kyc'),
-  require2FA,
-  verifyKYC
-);
+// Property management routes
+router.get('/properties', adminController.getProperties);
+router.put('/listings/:listingId/approve', adminController.approveListing);
+router.put('/listings/:listingId/reject', adminController.rejectListing);
 
-// Property management
-router.get('/properties', 
-  auditLog('view_properties'),
-  getAllProperties
-);
-router.get('/properties/pending', 
-  auditLog('view_pending_properties'),
-  getPendingProperties
-);
-router.put('/properties/:id/approve', 
-  sensitiveAdminRateLimit,
-  auditLog('approve_property'),
-  require2FA,
-  approveProperty
-);
+// Booking management routes
+router.get('/bookings', adminController.getBookings);
+router.post('/bookings/:bookingId/refund', adminController.refundBooking);
 
-// Booking management
-router.get('/bookings', 
-  auditLog('view_bookings'),
-  getAllBookings
-);
+// KYC management routes
+router.get('/kyc', adminController.getKYC);
+router.get('/kyc/:userId', adminController.getKYCById);
+router.put('/kyc/:kycId/verify', adminController.verifyKYC);
+router.put('/kyc/:kycId/reject', adminController.rejectKYC);
 
-// Host management
-router.get('/hosts', 
-  auditLog('view_hosts'),
-  getAllHosts
-);
-router.put('/hosts/:id/approve', 
-  sensitiveAdminRateLimit,
-  auditLog('approve_host'),
-  require2FA,
-  approveHost
-);
-router.put('/hosts/:id/reject', 
-  sensitiveAdminRateLimit,
-  auditLog('reject_host'),
-  require2FA,
-  rejectHost
-);
+// Payment management routes
+router.get('/payments', adminController.getPayments);
+router.post('/payments/:paymentId/payout', adminController.processPayout);
 
-// Payment management
-router.get('/payments', 
-  auditLog('view_payments'),
-  getAllPayments
-);
-router.post('/payments/:id/payout', 
-  sensitiveAdminRateLimit,
-  auditLog('process_manual_payout'),
-  require2FA,
-  processManualPayout
-);
+// Review management routes
+router.get('/reviews', adminController.getReviews);
+router.put('/reviews/:reviewId/flag', adminController.flagReview);
+router.delete('/reviews/:reviewId', adminController.deleteReview);
 
-// Review management
-router.get('/reviews', 
-  auditLog('view_reviews'),
-  getAllReviews
-);
-router.put('/reviews/:id/flag', 
-  sensitiveAdminRateLimit,
-  auditLog('flag_review'),
-  require2FA,
-  flagReview
-);
-router.delete('/reviews/:id', 
-  sensitiveAdminRateLimit,
-  auditLog('delete_review'),
-  require2FA,
-  deleteReview
-);
+// Settings routes
+router.get('/settings', adminController.getSettings);
+router.put('/settings', adminController.updateSettings);
 
-// Admin profile
-router.get('/profile', 
-  auditLog('view_admin_profile'),
-  getAdminProfile
-);
-router.put('/profile', 
-  sensitiveAdminRateLimit,
-  auditLog('update_admin_profile'),
-  require2FA,
-  updateAdminProfile
-);
+// Analytics and reports routes
+router.get('/analytics', adminController.getAnalytics);
+router.get('/reports', adminController.getReports);
 
-// Test email functionality
-router.post('/test-email', 
-  sensitiveAdminRateLimit,
-  auditLog('test_email'),
-  testEmail
-);
+// System routes
+router.get('/activities/recent', adminController.getRecentActivities);
+router.get('/system/health', adminController.getSystemHealth);
 
-module.exports = router; 
+// Payment audit routes
+router.get('/audit/payments', adminController.getPaymentAuditDashboard);
+router.get('/audit/validation-failures', adminController.getValidationFailures);
+router.get('/audit/payments/:paymentId', adminController.getPaymentAuditDetails);
+
+module.exports = router;

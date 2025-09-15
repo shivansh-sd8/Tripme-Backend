@@ -50,6 +50,16 @@ const paymentSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'Taxes must be non-negative']
   },
+  gst: {
+    type: Number,
+    default: 0,
+    min: [0, 'GST must be non-negative']
+  },
+  processingFee: {
+    type: Number,
+    default: 0,
+    min: [0, 'Processing fee must be non-negative']
+  },
   serviceFee: {
     type: Number,
     default: 0,
@@ -82,6 +92,42 @@ const paymentSchema = new mongoose.Schema({
       type: Number,
       default: 0,
       min: [0, 'Processing fee must be non-negative']
+    }
+  },
+  
+  // Complete pricing breakdown for consistency
+  pricingBreakdown: {
+    customerBreakdown: {
+      baseAmount: Number,
+      extraGuestCost: Number,
+      cleaningFee: Number,
+      serviceFee: Number,
+      securityDeposit: Number,
+      hourlyExtension: Number,
+      discountAmount: Number,
+      subtotal: Number,
+      platformFee: Number,
+      gst: Number,
+      processingFee: Number,
+      totalAmount: Number
+    },
+    hostBreakdown: {
+      baseAmount: Number,
+      extraGuestCost: Number,
+      cleaningFee: Number,
+      serviceFee: Number,
+      securityDeposit: Number,
+      hourlyExtension: Number,
+      discountAmount: Number,
+      subtotal: Number,
+      platformFee: Number,
+      hostEarning: Number
+    },
+    platformBreakdown: {
+      platformFee: Number,
+      processingFee: Number,
+      gst: Number,
+      platformRevenue: Number
     }
   },
   
@@ -188,16 +234,50 @@ paymentSchema.virtual('payoutAmount').get(function() {
 
 // Pre-save hook to calculate totals
 paymentSchema.pre('save', function(next) {
-  // Ensure total amount equals subtotal + fees
-  if (this.isModified('subtotal') || this.isModified('taxes') || this.isModified('serviceFee') || this.isModified('cleaningFee')) {
-    this.amount = this.subtotal + this.taxes + this.serviceFee + this.cleaningFee;
+  // Ensure total amount equals subtotal + all fees - discount
+  if (this.isModified('subtotal') || this.isModified('taxes') || this.isModified('serviceFee') || 
+      this.isModified('cleaningFee') || this.isModified('securityDeposit') || 
+      this.isModified('processingFee') || this.isModified('discountAmount')) {
+    
+    // Calculate total amount correctly
+    this.amount = this.subtotal + 
+                  this.taxes + 
+                  this.serviceFee + 
+                  this.cleaningFee + 
+                  this.securityDeposit + 
+                  this.processingFee + 
+                  (this.commission?.platformFee || 0) - 
+                  (this.discountAmount || 0);
+    
+    // Ensure amount is never negative
+    this.amount = Math.max(0, this.amount);
   }
   
-  // Calculate commission if not set
-  if (!this.commission.platformFee && this.amount > 0) {
-    const platformFeePercentage = 0.15; // 15% platform fee
-    this.commission.platformFee = Math.round(this.amount * platformFeePercentage * 100) / 100;
-    this.commission.hostEarning = Math.round((this.amount - this.commission.platformFee) * 100) / 100;
+  // Calculate commission if not set - USE DYNAMIC RATE FROM PRICING BREAKDOWN
+  if (!this.commission.platformFee && this.subtotal > 0) {
+    // Try to get platform fee rate from pricing breakdown first
+    let platformFeeRate = 0.15; // Fallback rate
+    
+    if (this.pricingBreakdown?.customerBreakdown?.platformFee && this.subtotal > 0) {
+      // Calculate rate from stored breakdown
+      platformFeeRate = this.pricingBreakdown.customerBreakdown.platformFee / this.subtotal;
+      console.log(`✅ Using platform fee rate from pricing breakdown: ${(platformFeeRate * 100).toFixed(1)}%`);
+    } else {
+      console.warn('⚠️ No pricing breakdown found, using fallback platform fee rate: 15%');
+    }
+    
+    this.commission.platformFee = Math.round(this.subtotal * platformFeeRate * 100) / 100;
+    this.commission.hostEarning = Math.round((this.subtotal - this.commission.platformFee) * 100) / 100;
+    
+    // Recalculate amount with correct platform fee
+    this.amount = this.subtotal + 
+                  this.taxes + 
+                  this.serviceFee + 
+                  this.cleaningFee + 
+                  this.securityDeposit + 
+                  this.processingFee + 
+                  this.commission.platformFee - 
+                  (this.discountAmount || 0);
   }
   
   next();

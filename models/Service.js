@@ -52,6 +52,7 @@ const serviceSchema = new mongoose.Schema({
       }
     },
     address: String,
+    userAddress: String, // User's own address description
     city: String,
     country: String
   },

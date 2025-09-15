@@ -21,7 +21,26 @@ const validatePayment = Joi.object({
   }),
   couponCode: Joi.string().optional().allow(''),
   ipAddress: Joi.string().ip().optional(),
-  userAgent: Joi.string().optional()
+  userAgent: Joi.string().optional(),
+  // Security fields
+  idempotencyKey: Joi.string().required().messages({
+    'string.empty': 'Idempotency key is required',
+    'any.required': 'Idempotency key is required'
+  }),
+  paymentData: Joi.object({
+    amount: Joi.number().min(0.01).optional(),
+    currency: Joi.string().valid('INR', 'USD', 'EUR', 'GBP').optional(),
+    subtotal: Joi.number().min(0).optional(),
+    platformFee: Joi.number().min(0).optional(),
+    gst: Joi.number().min(0).optional(),
+    processingFee: Joi.number().min(0).optional(),
+    discountAmount: Joi.number().min(0).optional()
+  }).optional(),
+  securityMetadata: Joi.object({
+    userAgent: Joi.string().optional(),
+    timestamp: Joi.string().optional(),
+    clientVersion: Joi.string().optional()
+  }).optional()
 });
 
 // Refund validation

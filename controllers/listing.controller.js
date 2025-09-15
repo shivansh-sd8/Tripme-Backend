@@ -218,6 +218,11 @@ const getListings = async (req, res) => {
     if (req.query['location.city']) {
       query['location.city'] = req.query['location.city'];
     }
+    
+    // Support both city and location.city parameters for backward compatibility
+    if (req.query.city) {
+      query['location.city'] = req.query.city;
+    }
 
 
 
@@ -597,6 +602,110 @@ const removeFromWishlist = async (req, res) => {
   }
 };
 
+// @desc    Publish listing
+// @route   POST /api/listings/:id/publish
+// @access  Private (Host/Owner only)
+const publishListing = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const listing = await Property.findById(id);
+
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+
+    // Check if user is the host or admin
+    if (listing.host && listing.host.toString() !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to publish this listing'
+      });
+    }
+
+    // Check if listing is already published
+    if (listing.status === 'published') {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing is already published'
+      });
+    }
+
+    // Publish the listing
+    listing.status = 'published';
+    listing.isDraft = false;
+    
+    await listing.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Listing published successfully',
+      data: { listing: transformListingForFrontend(listing) }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error publishing listing',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Unpublish listing
+// @route   POST /api/listings/:id/unpublish
+// @access  Private (Host/Owner only)
+const unpublishListing = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const listing = await Property.findById(id);
+
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+
+    // Check if user is the host or admin
+    if (listing.host && listing.host.toString() !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to unpublish this listing'
+      });
+    }
+
+    // Check if listing is already unpublished
+    if (listing.status !== 'published') {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing is not published'
+      });
+    }
+
+    // Unpublish the listing
+    listing.status = 'draft';
+    listing.isDraft = true;
+    
+    await listing.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Listing unpublished successfully',
+      data: { listing: transformListingForFrontend(listing) }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error unpublishing listing',
+      error: error.message
+    });
+  }
+};
+
 // @desc    Get featured listings
 // @route   GET /api/listings/featured
 // @access  Public
@@ -680,7 +789,9 @@ module.exports = {
   addToWishlist,
   removeFromWishlist,
   getFeaturedListings,
-  getSimilarListings
+  getSimilarListings,
+  publishListing,
+  unpublishListing
 };
 
 // --- STUBS FOR UNIMPLEMENTED ROUTE HANDLERS ---
@@ -699,8 +810,6 @@ const stubMethods = [
   'updatePricing',
   'updateListingStatus',
   'updateListingVisibility',
-  'publishListing',
-  'unpublishListing',
   'getListingReviews',
   'getListingRating',
   'getWishlistedListings',

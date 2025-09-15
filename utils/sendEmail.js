@@ -235,27 +235,99 @@ const emailTemplates = {
   bookingConfirmation: (userName, bookingDetails) => ({
     subject: 'Booking Request Submitted - TripMe',
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #3498db;">Booking Request Submitted!</h2>
-        <p>Hello ${userName},</p>
-        <p>Your booking request has been successfully submitted. Here are the details:</p>
-        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
-          <h3>Booking Details</h3>
-          <p><strong>Property:</strong> ${bookingDetails.propertyName}</p>
-          <p><strong>Check-in:</strong> ${bookingDetails.checkIn}</p>
-          <p><strong>Check-out:</strong> ${bookingDetails.checkOut}</p>
-          <p><strong>Guests:</strong> ${bookingDetails.guests}</p>
-          <p><strong>Total Amount:</strong> ₹${bookingDetails.totalAmount}</p>
-          <p><strong>Booking ID:</strong> ${bookingDetails.bookingId}</p>
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); padding: 30px; text-align: center;">
+          <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">Booking Request Submitted! 🎉</h1>
+          <p style="color: rgba(255, 255, 255, 0.9); margin: 10px 0 0 0; font-size: 16px;">Your adventure awaits</p>
         </div>
-        <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h4 style="color: #856404; margin: 0 0 10px 0;">⏳ What Happens Next?</h4>
-          <p style="color: #856404; margin: 0;">
-            <strong>Your booking is currently pending host approval.</strong> We will notify you via email once the host accepts your booking request.
+        
+        <!-- Content -->
+        <div style="padding: 40px 30px;">
+          <h2 style="color: #2c3e50; margin: 0 0 20px 0; font-size: 24px;">Hello ${userName}! 👋</h2>
+          
+          <p style="color: #555; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
+            Your booking request has been successfully submitted and payment processed. Here are your booking details:
+          </p>
+          
+          <!-- Booking Details Card -->
+          <div style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 4px solid #3498db;">
+            <h3 style="color: #2c3e50; margin: 0 0 20px 0; font-size: 20px;">📋 Booking Details</h3>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Property</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.propertyName}</p>
+              </div>
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Booking ID</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500; font-family: monospace;">${bookingDetails.bookingId}</p>
+              </div>
+            </div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Check-in</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.checkIn}</p>
+                ${bookingDetails.checkInTime ? `<p style="color: #666; font-size: 14px; margin: 2px 0 0 0;">at ${bookingDetails.checkInTime}</p>` : ''}
+              </div>
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Check-out</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.checkOut}</p>
+                ${bookingDetails.checkOutTime ? `<p style="color: #666; font-size: 14px; margin: 2px 0 0 0;">at ${bookingDetails.checkOutTime}</p>` : ''}
+              </div>
+            </div>
+            
+            ${bookingDetails.hourlyExtension ? `
+            <div style="background: linear-gradient(135deg, #e8f5e8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 3px solid #28a745;">
+              <p style="color: #155724; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">🕐 Hourly Extension</p>
+              <p style="color: #155724; font-size: 16px; margin: 0; font-weight: 500;">+${bookingDetails.hourlyExtension} hours added to your stay</p>
+              <p style="color: #155724; font-size: 12px; margin: 5px 0 0 0;">Extended checkout time: ${bookingDetails.checkOutTime}</p>
+            </div>
+            ` : ''}
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Guests</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.guests}</p>
+              </div>
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Total Amount</p>
+                <p style="color: #27ae60; font-size: 18px; margin: 0; font-weight: bold;">₹${bookingDetails.totalAmount}</p>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Status Card -->
+          <div style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); border: 1px solid #ffeaa7; padding: 20px; border-radius: 12px; margin: 25px 0;">
+            <h4 style="color: #856404; margin: 0 0 15px 0; font-size: 18px;">⏳ What Happens Next?</h4>
+            <p style="color: #856404; margin: 0; font-size: 16px; line-height: 1.5;">
+              <strong>Your booking is currently pending host approval.</strong> We will notify you via email once the host accepts your booking request. You can also check your booking status in your account dashboard.
+            </p>
+          </div>
+          
+          <!-- Important Notes -->
+          <div style="background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%); border-radius: 12px; padding: 20px; margin: 25px 0;">
+            <h4 style="color: #1976d2; margin: 0 0 15px 0; font-size: 18px;">📝 Important Notes</h4>
+            <ul style="color: #555; font-size: 14px; line-height: 1.6; margin: 0; padding-left: 20px;">
+              <li>Please arrive at the check-in time specified above</li>
+              <li>Contact the host if you need to modify your arrival time</li>
+              <li>Keep your booking ID handy for reference</li>
+              <li>Check your email for updates on booking status</li>
+            </ul>
+          </div>
+        </div>
+        
+        <!-- Footer -->
+        <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-top: 1px solid #e9ecef;">
+          <p style="color: #6c757d; margin: 0; font-size: 16px;">
+            Thank you for choosing TripMe! We'll keep you updated on your booking status.
+          </p>
+          <p style="color: #6c757d; margin: 10px 0 0 0; font-size: 14px;">
+            Best regards,<br>
+            <strong>The TripMe Team</strong>
           </p>
         </div>
-        <p>Thank you for choosing TripMe! We'll keep you updated on your booking status.</p>
-        <p>Best regards,<br>The TripMe Team</p>
       </div>
     `
   }),
@@ -476,23 +548,107 @@ const emailTemplates = {
   }),
 
   newBookingNotification: (userName, bookingDetails) => ({
-    subject: 'New Booking Received - TripMe',
+    subject: 'New Booking Request - TripMe',
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #27ae60;">New Booking!</h2>
-        <p>Hello ${userName},</p>
-        <p>You have received a new booking for your property.</p>
-        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
-          <h3>Booking Details</h3>
-          <p><strong>Property:</strong> ${bookingDetails.propertyName}</p>
-          <p><strong>Guest:</strong> ${bookingDetails.guestName}</p>
-          <p><strong>Check-in:</strong> ${bookingDetails.checkIn}</p>
-          <p><strong>Check-out:</strong> ${bookingDetails.checkOut}</p>
-          <p><strong>Guests:</strong> ${bookingDetails.guests}</p>
-          <p><strong>Total Amount:</strong> ₹${bookingDetails.totalAmount}</p>
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); padding: 30px; text-align: center;">
+          <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">New Booking Request! 🎉</h1>
+          <p style="color: rgba(255, 255, 255, 0.9); margin: 10px 0 0 0; font-size: 16px;">A guest wants to book your property</p>
         </div>
-        <p>Please review and respond to this booking request.</p>
-        <p>Best regards,<br>The TripMe Team</p>
+        
+        <!-- Content -->
+        <div style="padding: 40px 30px;">
+          <h2 style="color: #2c3e50; margin: 0 0 20px 0; font-size: 24px;">Hello ${userName}! 👋</h2>
+          
+          <p style="color: #555; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
+            You have received a new booking request for your property. Please review the details below and take action within 24 hours.
+          </p>
+          
+          <!-- Booking Details Card -->
+          <div style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 4px solid #27ae60;">
+            <h3 style="color: #2c3e50; margin: 0 0 20px 0; font-size: 20px;">📋 Booking Request Details</h3>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Property</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.propertyName}</p>
+              </div>
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Guest</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.guestName}</p>
+              </div>
+            </div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Check-in</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.checkIn}</p>
+                ${bookingDetails.checkInTime ? `<p style="color: #666; font-size: 14px; margin: 2px 0 0 0;">at ${bookingDetails.checkInTime}</p>` : ''}
+              </div>
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Check-out</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.checkOut}</p>
+                ${bookingDetails.checkOutTime ? `<p style="color: #666; font-size: 14px; margin: 2px 0 0 0;">at ${bookingDetails.checkOutTime}</p>` : ''}
+              </div>
+            </div>
+            
+            ${bookingDetails.hourlyExtension ? `
+            <div style="background: linear-gradient(135deg, #e8f5e8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 3px solid #28a745;">
+              <p style="color: #155724; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">🕐 Hourly Extension Requested</p>
+              <p style="color: #155724; font-size: 16px; margin: 0; font-weight: 500;">Guest wants to extend stay by +${bookingDetails.hourlyExtension} hours</p>
+              <p style="color: #155724; font-size: 12px; margin: 5px 0 0 0;">Extended checkout time: ${bookingDetails.checkOutTime}</p>
+            </div>
+            ` : ''}
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Guests</p>
+                <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500;">${bookingDetails.guests}</p>
+              </div>
+              <div>
+                <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Total Amount</p>
+                <p style="color: #27ae60; font-size: 18px; margin: 0; font-weight: bold;">₹${bookingDetails.totalAmount}</p>
+              </div>
+            </div>
+            
+            <div style="border-top: 1px solid #dee2e6; padding-top: 15px;">
+              <p style="color: #666; font-size: 14px; margin: 0 0 5px 0; font-weight: 600;">Booking ID</p>
+              <p style="color: #2c3e50; font-size: 16px; margin: 0; font-weight: 500; font-family: monospace;">${bookingDetails.bookingId}</p>
+            </div>
+          </div>
+          
+          <!-- Action Required Card -->
+          <div style="background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); border: 1px solid #c3e6cb; padding: 20px; border-radius: 12px; margin: 25px 0;">
+            <h4 style="color: #155724; margin: 0 0 15px 0; font-size: 18px;">⚡ Action Required</h4>
+            <p style="color: #155724; margin: 0; font-size: 16px; line-height: 1.5;">
+              <strong>Please review this booking request and take action within 24 hours.</strong> You can accept or decline this booking from your host dashboard. If no action is taken, the booking will automatically expire.
+            </p>
+          </div>
+          
+          <!-- Next Steps -->
+          <div style="background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%); border-radius: 12px; padding: 20px; margin: 25px 0;">
+            <h4 style="color: #1976d2; margin: 0 0 15px 0; font-size: 18px;">📝 What to Do Next</h4>
+            <ul style="color: #555; font-size: 14px; line-height: 1.6; margin: 0; padding-left: 20px;">
+              <li>Log in to your host dashboard</li>
+              <li>Review the guest's profile and booking details</li>
+              <li>Check your property's availability for the requested dates</li>
+              <li>Accept or decline the booking within 24 hours</li>
+              <li>Contact the guest if you have any questions</li>
+            </ul>
+          </div>
+        </div>
+        
+        <!-- Footer -->
+        <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-top: 1px solid #e9ecef;">
+          <p style="color: #6c757d; margin: 0; font-size: 16px;">
+            Thank you for hosting with TripMe! We're here to support you.
+          </p>
+          <p style="color: #6c757d; margin: 10px 0 0 0; font-size: 14px;">
+            Best regards,<br>
+            <strong>The TripMe Team</strong>
+          </p>
+        </div>
       </div>
     `
   }),

@@ -7,6 +7,18 @@ const AuthorizationMiddleware = require('../middlewares/authorization.middleware
 const { bookingRateLimit } = require('../middlewares/rateLimit.middleware');
 const { securityMiddleware } = require('../middlewares/security.middleware');
 
+// Public routes (no authentication required)
+// Hourly booking calculations and settings
+router.post('/calculate-hourly-price', 
+  securityMiddleware.auditLog('calculate_hourly_booking_price'),
+  bookingController.calculateHourlyPrice
+);
+
+router.get('/property/:id/hourly-settings', 
+  securityMiddleware.auditLog('get_hourly_booking_settings'),
+  bookingController.getHourlySettings
+);
+
 // Protected routes (require authentication)
 router.use(auth);
 
@@ -24,6 +36,13 @@ router.get('/stats/overview',
 );
 
 // Booking CRUD operations
+router.post('/process-payment', 
+  bookingRateLimit,
+  securityMiddleware.auditLog('process_payment_and_create_booking'),
+  validateBooking, 
+  bookingController.processPaymentAndCreateBooking
+);
+
 router.post('/', 
   securityMiddleware.auditLog('create_booking'),
   validateBooking, 
@@ -64,6 +83,16 @@ router.get('/:id',
   AuthorizationMiddleware.canAccessBooking, 
   bookingController.getBookingById
 );
+router.put('/:id/accept', 
+  securityMiddleware.auditLog('accept_booking'),
+  AuthorizationMiddleware.canAccessBooking, 
+  bookingController.acceptBooking
+);
+router.put('/:id/reject', 
+  securityMiddleware.auditLog('reject_booking'),
+  AuthorizationMiddleware.canAccessBooking, 
+  bookingController.rejectBooking
+);
 router.put('/:id/status', 
   securityMiddleware.auditLog('update_booking_status'),
   AuthorizationMiddleware.canAccessBooking, 
@@ -78,6 +107,50 @@ router.post('/:id/cancel',
   securityMiddleware.auditLog('cancel_booking'),
   AuthorizationMiddleware.canAccessBooking, 
   bookingController.cancelBooking
+);
+
+// Refund routes
+router.post('/:id/refund-security-deposit', 
+  securityMiddleware.auditLog('refund_security_deposit'),
+  AuthorizationMiddleware.canAccessBooking, 
+  bookingController.refundSecurityDeposit
+);
+
+router.get('/refunds', 
+  securityMiddleware.auditLog('view_refund_history'),
+  bookingController.getRefundHistory
+);
+
+router.get('/:id/refund', 
+  securityMiddleware.auditLog('view_booking_refund_details'),
+  AuthorizationMiddleware.canAccessBooking, 
+  bookingController.getBookingRefund
+);
+
+// Admin refund management routes
+router.get('/admin/refunds/pending', 
+  securityMiddleware.auditLog('view_pending_refunds'),
+  bookingController.getPendingRefunds
+);
+
+router.put('/admin/refunds/:id/approve', 
+  securityMiddleware.auditLog('approve_refund'),
+  bookingController.approveRefund
+);
+
+router.put('/admin/refunds/:id/reject', 
+  securityMiddleware.auditLog('reject_refund'),
+  bookingController.rejectRefund
+);
+
+router.put('/admin/refunds/:id/processing', 
+  securityMiddleware.auditLog('mark_refund_processing'),
+  bookingController.markRefundAsProcessing
+);
+
+router.put('/admin/refunds/:id/complete', 
+  securityMiddleware.auditLog('mark_refund_completed'),
+  bookingController.markRefundAsCompleted
 );
 
 // Debug endpoint - REMOVED FOR PRODUCTION SECURITY

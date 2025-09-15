@@ -4,6 +4,7 @@ const paymentController = require('../controllers/payment.controller');
 const { auth } = require('../middlewares/auth.middleware');
 const { validatePayment, validateRefund } = require('../validations/payment.validation');
 const AuthorizationMiddleware = require('../middlewares/authorization.middleware');
+const { bookingRateLimit, strictRateLimit } = require('../middlewares/rateLimit.middleware');
 
 // Local helper to wrap Joi schemas as Express middleware
 const validateBody = (schema) => (req, res, next) => {
@@ -29,11 +30,11 @@ const validateBody = (schema) => (req, res, next) => {
 // Protected routes (require authentication)
 router.use(auth);
 
-// Payment processing
-router.post('/process', validateBody(validatePayment), paymentController.processPayment);
-router.post('/confirm/:paymentId', paymentController.confirmPayment);
-router.post('/cancel/:paymentId', paymentController.cancelPayment);
-router.post('/:paymentId/fail', paymentController.handlePaymentFailure);
+// Payment processing (with rate limiting)
+router.post('/process', strictRateLimit, validateBody(validatePayment), paymentController.processPayment);
+router.post('/confirm/:paymentId', strictRateLimit, paymentController.confirmPayment);
+router.post('/cancel/:paymentId', strictRateLimit, paymentController.cancelPayment);
+router.post('/:paymentId/fail', strictRateLimit, paymentController.handlePaymentFailure);
 
 // Payment methods management
 router.get('/methods', paymentController.getPaymentMethods);

@@ -5,8 +5,10 @@ const User = require('../models/User');
 const Payment = require('../models/Payment');
 const Coupon = require('../models/Coupon');
 const Availability = require('../models/Availability');
+const { calculatePricingBreakdown, calculateHourlyExtension, calculateExtendedCheckout, getAdditionalDatesForExtension, PRICING_CONFIG, toTwoDecimals } = require('../config/pricing.config');
 
 const Notification = require('../models/Notification');
+const RefundService = require('../services/refundService');
 const { 
   sendBookingConfirmationEmail, 
   sendNewBookingNotificationEmail, 
@@ -19,7 +21,521 @@ const {
 } = require('../utils/sendEmail');
 const { generateReceipt, generateReceiptHTML } = require('../utils/generateReceipt');
 
-// @desc    Create new booking
+// @desc    Process payment and create booking (new flow)
+// @route   POST /api/bookings/process-payment
+// @access  Private
+const processPaymentAndCreateBooking = async (req, res) => {
+  try {
+    const {
+      propertyId,
+      listingId,
+      serviceId,
+      checkIn,
+      checkOut,
+      checkInTime,
+      checkOutTime,
+      timeSlot,
+      guests,
+      specialRequests,
+      couponCode,
+      hourlyExtension,
+      contactInfo,
+      paymentMethod,
+      idempotencyKey,
+      paymentData
+    } = req.body;
+    
+    // Generate idempotency key if not provided
+    const finalIdempotencyKey = idempotencyKey || require('crypto').randomUUID();
+    
+    // Check for duplicate booking with same idempotency key
+    const existingBooking = await Booking.findOne({ 
+      'metadata.idempotencyKey': finalIdempotencyKey,
+      user: req.user._id
+    });
+    
+    if (existingBooking) {
+      return res.status(409).json({ 
+        success: false, 
+        message: 'Booking with this idempotency key already exists',
+        bookingId: existingBooking._id
+      });
+    }
+
+    // Determine if this is a property or service booking
+    const actualListingId = listingId || propertyId;
+    let listing = null;
+    let service = null;
+    let host = null;
+    let bookingType = '';
+    let currency = 'INR';
+    let cancellationPolicy = 'moderate';
+
+    if (actualListingId && serviceId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot book both listing and service in one booking'
+      });
+    }
+    if (!actualListingId && !serviceId) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Either listingId/propertyId or serviceId is required'
+      });
+    }
+
+    // Get listing or service details
+    if (actualListingId) {
+      listing = await Property.findById(actualListingId);
+      if (!listing) {
+        return res.status(404).json({ success: false, message: 'Listing not found' });
+      }
+      host = await User.findById(listing.host);
+      bookingType = 'property';
+      currency = listing.pricing.currency || 'INR';
+      cancellationPolicy = listing.cancellationPolicy || 'moderate';
+    } else {
+      service = await Service.findById(serviceId);
+      if (!service) {
+        return res.status(404).json({ success: false, message: 'Service not found' });
+      }
+      host = await User.findById(service.provider);
+      bookingType = 'service';
+      currency = service.pricing.currency || 'INR';
+      cancellationPolicy = service.cancellationPolicy || 'moderate';
+    }
+
+    if (!host) {
+      return res.status(404).json({ success: false, message: 'Host not found' });
+    }
+    
+    // Security validation for booking parameters
+    const bookingValidation = require('../utils/paymentSecurity').validateBookingParameters({
+      checkIn: checkIn,
+      checkOut: checkOut,
+      guests: guests,
+      basePrice: listing?.pricing?.basePrice || service?.pricing?.basePrice,
+      hourlyExtension: hourlyExtension
+    });
+    
+    if (!bookingValidation.isValid) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid booking parameters',
+        errors: bookingValidation.errors
+      });
+    }
+    
+    // Verify payment amount if provided
+    if (paymentData) {
+      const amountVerification = require('../utils/paymentSecurity').verifyPaymentAmount(paymentData, {
+        basePrice: listing?.pricing?.basePrice || service?.pricing?.basePrice || 0,
+        nights: bookingType === 'property' ? 
+          Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)) : 1,
+        cleaningFee: listing?.pricing?.cleaningFee || service?.pricing?.cleaningFee || 0,
+        serviceFee: listing?.pricing?.serviceFee || service?.pricing?.serviceFee || 0,
+        securityDeposit: listing?.pricing?.securityDeposit || service?.pricing?.securityDeposit || 0,
+        extraGuestPrice: listing?.pricing?.extraGuestPrice || service?.pricing?.perPersonPrice || 0,
+        extraGuests: guests?.adults > 1 ? guests.adults - 1 : 0,
+        hourlyExtension: hourlyExtension?.cost || 0,
+        discountAmount: 0, // Will be calculated later
+        currency: currency
+      });
+      
+      if (!amountVerification.isValid) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Payment amount verification failed',
+          errors: amountVerification.errors,
+          expectedAmount: amountVerification.expectedAmount,
+          actualAmount: amountVerification.actualAmount
+        });
+      }
+    }
+
+    // Calculate pricing using centralized pricing system
+    let pricingParams = {
+      basePrice: 0,
+      nights: 1,
+      cleaningFee: 0,
+      serviceFee: 0,
+      securityDeposit: 0,
+      extraGuestPrice: 0,
+      extraGuests: 0,
+      hourlyExtension: 0,
+      discountAmount: 0,
+      currency: currency
+    };
+
+    if (bookingType === 'property') {
+      pricingParams.basePrice = listing.pricing.basePrice;
+      pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
+      pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
+      pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals(listing.pricing.basePrice * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
+      pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
+      pricingParams.nights = Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24));
+      pricingParams.extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
+      
+      // Add hourly extension cost if applicable
+      if (hourlyExtension && hourlyExtension.hours && listing.hourlyBooking?.enabled) {
+        pricingParams.hourlyExtension = calculateHourlyExtension(listing.pricing.basePrice, hourlyExtension.hours);
+        console.log(`🕐 Hourly extension calculated: ${hourlyExtension.hours} hours = ₹${pricingParams.hourlyExtension}`);
+      }
+    } else {
+      pricingParams.basePrice = service.pricing.basePrice;
+      pricingParams.serviceFee = service.pricing.serviceFee || 0;
+      pricingParams.extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
+      pricingParams.extraGuestPrice = service.pricing.perPersonPrice || 0;
+    }
+
+    // Apply coupon if provided
+    let couponApplied = null;
+    if (couponCode) {
+      const coupon = await Coupon.findOne({
+        code: couponCode.toUpperCase(),
+        isActive: true,
+        validFrom: { $lte: new Date() },
+        validTo: { $gte: new Date() }
+      });
+      if (coupon) {
+        const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
+        if (!hasUsed) {
+          // Calculate subtotal first to apply coupon discount
+          const tempPricing = await calculatePricingBreakdown(pricingParams);
+          let discountAmount = 0;
+          
+          if (coupon.discountType === 'percentage') {
+            discountAmount = (tempPricing.subtotal * coupon.amount) / 100;
+            const maxDiscount = coupon.maxDiscount || discountAmount;
+            discountAmount = Math.min(discountAmount, maxDiscount);
+          } else {
+            discountAmount = coupon.amount;
+          }
+          
+          pricingParams.discountAmount = discountAmount;
+          couponApplied = coupon._id;
+          coupon.usedCount += 1;
+          coupon.usedBy.push({ user: req.user._id, usedAt: new Date() });
+          await coupon.save();
+        }
+      }
+    }
+
+    // Calculate final pricing breakdown
+    const pricing = await calculatePricingBreakdown(pricingParams);
+    
+    // Extract values for backward compatibility
+    const {
+      subtotal,
+      platformFee,
+      totalAmount,
+      hostEarning,
+      gst,
+      processingFee,
+      breakdown
+    } = pricing;
+
+    // Handle hourly extension checkout time calculation
+    let finalCheckOut = checkOut;
+    let finalCheckOutTime = checkOutTime || (bookingType === 'property' ? (listing.checkOutTime || '10:00') : undefined);
+    
+    if (bookingType === 'property' && hourlyExtension && hourlyExtension.hours) {
+      const extensionInfo = calculateExtendedCheckout(
+        checkOut, 
+        hourlyExtension.hours, 
+        finalCheckOutTime
+      );
+      
+      // Update checkout date and time based on extension
+      finalCheckOut = extensionInfo.checkoutDate;
+      finalCheckOutTime = extensionInfo.checkoutTime;
+      
+      console.log(`🕐 Hourly extension applied: +${hourlyExtension.hours} hours`);
+      console.log(`📅 Original checkout: ${checkOut.toISOString()}`);
+      console.log(`📅 New checkout: ${finalCheckOut.toISOString()}`);
+      console.log(`⏰ New checkout time: ${finalCheckOutTime}`);
+      console.log(`📆 Extends to next day: ${extensionInfo.isNextDay}`);
+    }
+
+    // Step 1: Create booking first (temporary, will be updated after payment)
+    const booking = await Booking.create({
+      user: req.user._id,
+      host: host._id,
+      listing: bookingType === 'property' ? actualListingId : undefined,
+      service: bookingType === 'service' ? serviceId : undefined,
+      bookingType,
+      status: 'pending', // Will be updated to confirmed after payment
+      checkIn: bookingType === 'property' ? checkIn : undefined,
+      checkOut: bookingType === 'property' ? finalCheckOut : undefined,
+      checkInTime: checkInTime || (bookingType === 'property' ? (listing.checkInTime || '11:00') : undefined),
+      checkOutTime: finalCheckOutTime,
+      timeSlot: bookingType === 'service' ? timeSlot : undefined,
+      guests: guests,
+      totalAmount,
+      subtotal: subtotal,
+      taxAmount: gst,
+      serviceFee: pricing.serviceFee,
+      cleaningFee: pricing.cleaningFee,
+      securityDeposit: pricing.securityDeposit,
+      currency,
+      cancellationPolicy,
+      specialRequests: specialRequests || undefined,
+      hourlyExtension: hourlyExtension || undefined,
+      contactInfo: contactInfo || undefined,
+      paymentStatus: 'pending', // Will be updated to paid after payment
+      refundAmount: 0,
+      refunded: false,
+      couponApplied,
+      discountAmount: pricing.discountAmount,
+      hostFee: hostEarning,
+      platformFee: platformFee,
+      processingFee: processingFee,
+      gst: gst,
+      // Store pricing breakdown for detailed reporting
+      pricingBreakdown: breakdown,
+      // Security metadata
+      metadata: {
+        idempotencyKey: finalIdempotencyKey,
+        userAgent: req.get('User-Agent'),
+        ipAddress: req.ip,
+        forwardedFor: req.get('X-Forwarded-For'),
+        realIp: req.get('X-Real-IP'),
+        referer: req.get('Referer'),
+        origin: req.get('Origin'),
+        timestamp: new Date().toISOString(),
+        securityVersion: '1.0'
+      }
+    });
+
+    // Step 2: Create payment with booking reference
+    // Map frontend payment method to backend payment method
+    const paymentMethodMap = {
+      'card': 'credit_card',
+      'paypal': 'paypal',
+      'apple_pay': 'wallet',
+      'google_pay': 'wallet'
+    };
+    
+    const mappedPaymentMethod = paymentMethodMap[paymentMethod] || 'credit_card';
+    
+    const payment = new Payment({
+      booking: booking._id,
+      user: req.user._id,
+      host: host._id,
+      amount: totalAmount,
+      currency: currency,
+      paymentMethod: mappedPaymentMethod,
+      subtotal: subtotal,
+      taxes: gst,
+      gst: gst,
+      processingFee: processingFee,
+      serviceFee: pricing.serviceFee,
+      cleaningFee: pricing.cleaningFee,
+      securityDeposit: pricing.securityDeposit,
+      status: 'processing',
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent'),
+      // Store complete pricing breakdown
+      pricingBreakdown: breakdown,
+      // Store commission structure
+      commission: {
+        platformFee: platformFee,
+        hostEarning: hostEarning,
+        processingFee: processingFee
+      },
+      // Security metadata
+      metadata: {
+        idempotencyKey: finalIdempotencyKey,
+        userAgent: req.get('User-Agent'),
+        ipAddress: req.ip,
+        forwardedFor: req.get('X-Forwarded-For'),
+        realIp: req.get('X-Real-IP'),
+        referer: req.get('Referer'),
+        origin: req.get('Origin'),
+        timestamp: new Date().toISOString(),
+        securityVersion: '1.0',
+        sessionId: require('crypto').randomUUID()
+      }
+    });
+
+    await payment.save();
+
+    // Step 3: Process payment (simulate success for now)
+    // TODO: Replace with real payment gateway verification
+    payment.status = 'completed';
+    payment.processedAt = new Date();
+    await payment.save();
+
+    // Step 4: Update booking with payment reference but keep as pending for host approval
+    booking.payment = payment._id;
+    booking.status = 'pending'; // Keep pending until host approves
+    booking.paymentStatus = 'paid'; // Payment is successful but booking needs host approval
+    await booking.save();
+
+    // Step 4.5: Block availability for the booking dates (including hourly extensions)
+    if (bookingType === 'property' && actualListingId && checkIn && finalCheckOut) {
+      try {
+        console.log('🔒 Blocking property dates for booking...');
+        
+        // Generate array of dates to block
+        const startDate = new Date(checkIn);
+        const endDate = new Date(finalCheckOut);
+        const datesToBlock = [];
+        
+        let currentDate = new Date(startDate);
+        while (currentDate <= endDate) {
+          const dateStr = currentDate.toISOString().split('T')[0];
+          datesToBlock.push(dateStr);
+          currentDate.setDate(currentDate.getDate() + 1);
+        }
+        
+        // Add additional dates for hourly extensions if they extend to next day
+        if (hourlyExtension && hourlyExtension.hours) {
+          const additionalDates = getAdditionalDatesForExtension(
+            checkOut, 
+            hourlyExtension.hours, 
+            finalCheckOutTime
+          );
+          
+          additionalDates.forEach(date => {
+            const dateStr = date.toISOString().split('T')[0];
+            if (!datesToBlock.includes(dateStr)) {
+              datesToBlock.push(dateStr);
+            }
+          });
+        }
+        
+        console.log('📅 Property dates to block:', datesToBlock);
+        
+        // Create or update availability records for each date
+        for (const dateStr of datesToBlock) {
+          await Availability.findOneAndUpdate(
+            {
+              property: actualListingId,
+              date: new Date(dateStr)
+            },
+            {
+              property: actualListingId,
+              date: new Date(dateStr),
+              status: 'blocked',
+              reason: 'Booking in progress',
+              blockedBy: req.user._id,
+              blockedAt: new Date()
+            },
+            { upsert: true, new: true }
+          );
+        }
+        
+        console.log(`✅ Successfully blocked ${datesToBlock.length} property dates for booking`);
+        
+      } catch (availabilityError) {
+        console.error('⚠️ Error blocking property dates:', availabilityError);
+        // Don't fail the booking if availability blocking fails
+        // The booking can still proceed, but dates won't be blocked
+      }
+    }
+
+    // Step 5: Create notification for host
+    await Notification.create({
+      user: host._id,
+      type: 'booking',
+      title: 'New Booking Request',
+      message: `You have a new booking request from ${req.user.name}. Please review and accept or decline.`,
+      relatedEntity: {
+        type: 'Booking',
+        id: booking._id
+      }
+    });
+
+    // Step 6: Send confirmation emails
+    try {
+      // Send confirmation email to user
+      await sendBookingConfirmationEmail(req.user.email, req.user.name, {
+        bookingId: booking._id,
+        propertyName: listing?.title || service?.title,
+        checkIn: booking.checkIn ? new Date(booking.checkIn).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }) : new Date(booking.timeSlot?.startTime).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        checkOut: booking.checkOut ? new Date(booking.checkOut).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }) : new Date(booking.timeSlot?.endTime).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        checkInTime: booking.checkInTime,
+        checkOutTime: booking.checkOutTime,
+        hourlyExtension: booking.hourlyExtension?.hours,
+        guests: `${booking.guests.adults} adults${booking.guests.children > 0 ? `, ${booking.guests.children} children` : ''}${booking.guests.infants > 0 ? `, ${booking.guests.infants} infants` : ''}`,
+        totalAmount: booking.totalAmount.toLocaleString(),
+        currency: booking.currency,
+        status: 'pending' // Indicate that booking is pending host approval
+      });
+
+      // Send notification email to host
+      await sendNewBookingNotificationEmail(host.email, host.name, {
+        bookingId: booking._id,
+        guestName: req.user.name,
+        propertyName: listing?.title || service?.title,
+        checkIn: booking.checkIn ? new Date(booking.checkIn).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }) : new Date(booking.timeSlot?.startTime).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        checkOut: booking.checkOut ? new Date(booking.checkOut).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }) : new Date(booking.timeSlot?.endTime).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        checkInTime: booking.checkInTime,
+        checkOutTime: booking.checkOutTime,
+        hourlyExtension: booking.hourlyExtension?.hours,
+        guests: `${booking.guests.adults} adults${booking.guests.children > 0 ? `, ${booking.guests.children} children` : ''}${booking.guests.infants > 0 ? `, ${booking.guests.infants} infants` : ''}`,
+        totalAmount: booking.totalAmount.toLocaleString(),
+        currency: booking.currency
+      });
+    } catch (emailError) {
+      console.error('Email sending failed:', emailError);
+      // Don't fail the booking if email fails
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Booking request created and payment processed successfully',
+      data: { 
+        booking,
+        payment,
+        message: `Booking request submitted! Payment of ₹${totalAmount} processed successfully. The host will review your request and confirm within 24 hours.`
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in processPaymentAndCreateBooking:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process payment and create booking',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Create new booking (legacy - for backward compatibility)
 // @route   POST /api/bookings
 // @access  Private
 const createBooking = async (req, res) => {
@@ -35,7 +551,8 @@ const createBooking = async (req, res) => {
       timeSlot,
       guests,
       specialRequests,
-      couponCode
+      couponCode,
+      hourlyExtension
     } = req.body;
 
     // Determine if this is a property or service booking
@@ -118,45 +635,42 @@ const createBooking = async (req, res) => {
       };
     }
 
-    // Calculate total amount and fees
-    let totalAmount = 0;
-    let basePrice = 0;
-    let extraGuestPrice = 0;
-    let cleaningFee = 0;
-    let serviceFee = 0;
-    let securityDeposit = 0;
-    let nights = 1;
-    let platformFee = 0;
-    let hostEarning = 0;
+    // Calculate pricing using centralized pricing system
+    let pricingParams = {
+      basePrice: 0,
+      nights: 1,
+      cleaningFee: 0,
+      serviceFee: 0,
+      securityDeposit: 0,
+      extraGuestPrice: 0,
+      extraGuests: 0,
+      hourlyExtension: 0,
+      discountAmount: 0,
+      currency: currency
+    };
     
     if (bookingType === 'property') {
-      basePrice = listing.pricing.basePrice;
-      extraGuestPrice = listing.pricing.extraGuestPrice || 0;
-      cleaningFee = listing.pricing.cleaningFee || 0;
-      serviceFee = listing.pricing.serviceFee || 0;
-      securityDeposit = listing.pricing.securityDeposit || 0;
-      nights = Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24));
-      totalAmount = basePrice * nights;
-      if (guestDetails.adults > 1) {
-        const extraGuests = guestDetails.adults - 1;
-        totalAmount += extraGuestPrice * extraGuests * nights;
+      pricingParams.basePrice = listing.pricing.basePrice;
+      pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
+      pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
+      pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals(listing.pricing.basePrice * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
+      pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
+      pricingParams.nights = Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24));
+      pricingParams.extraGuests = guestDetails.adults > 1 ? guestDetails.adults - 1 : 0;
+      
+      // Add hourly extension cost if applicable
+      if (hourlyExtension && hourlyExtension.hours && listing.hourlyBooking?.enabled) {
+        pricingParams.hourlyExtension = calculateHourlyExtension(listing.pricing.basePrice, hourlyExtension.hours);
+        console.log(`🕐 Hourly extension calculated: ${hourlyExtension.hours} hours = ₹${pricingParams.hourlyExtension}`);
       }
-      totalAmount += cleaningFee + serviceFee;
     } else {
-      basePrice = service.pricing.basePrice;
-      serviceFee = service.pricing.serviceFee || 0;
-      totalAmount = basePrice + serviceFee;
-      if (guestDetails.adults > 1) {
-        totalAmount += service.pricing.perPersonPrice * (guestDetails.adults - 1);
-      }
+      pricingParams.basePrice = service.pricing.basePrice;
+      pricingParams.serviceFee = service.pricing.serviceFee || 0;
+      pricingParams.extraGuests = guestDetails.adults > 1 ? guestDetails.adults - 1 : 0;
+      pricingParams.extraGuestPrice = service.pricing.perPersonPrice || 0;
     }
-
-    // Calculate platform fees and host earnings
-    const platformFeePercentage = 0.15; // 15% platform fee
-    const hostEarningPercentage = 0.85; // 85% goes to host
     
     // Apply coupon if provided
-    let discountAmount = 0;
     let couponApplied = null;
     if (couponCode) {
       const coupon = await Coupon.findOne({
@@ -169,26 +683,44 @@ const createBooking = async (req, res) => {
         // Check if user has already used this coupon
         const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
         if (!hasUsed) {
+          // Calculate subtotal first to apply coupon discount
+          const tempPricing = await calculatePricingBreakdown(pricingParams);
+          let discountAmount = 0;
+          
           if (coupon.discountType === 'percentage') {
-            discountAmount = (totalAmount * coupon.amount) / 100;
+            discountAmount = (tempPricing.subtotal * coupon.amount) / 100;
             if (coupon.maxDiscount) {
               discountAmount = Math.min(discountAmount, coupon.maxDiscount);
             }
           } else {
             discountAmount = coupon.amount;
           }
-          if (coupon.minBookingAmount && totalAmount < coupon.minBookingAmount) {
+          if (coupon.minBookingAmount && tempPricing.subtotal < coupon.minBookingAmount) {
             discountAmount = 0;
           }
+          
+          pricingParams.discountAmount = discountAmount;
           couponApplied = coupon._id;
+          coupon.usedCount += 1;
+          coupon.usedBy.push({ user: req.user._id, usedAt: new Date() });
+          await coupon.save();
         }
       }
     }
+
+    // Calculate final pricing breakdown
+    const pricing = await calculatePricingBreakdown(pricingParams);
     
-    // Apply discount and recalculate fees
-    totalAmount -= discountAmount;
-    platformFee = totalAmount * platformFeePercentage;
-    hostEarning = totalAmount * hostEarningPercentage;
+    // Extract values for backward compatibility
+    const {
+      subtotal,
+      platformFee,
+      totalAmount,
+      hostEarning,
+      gst,
+      processingFee,
+      breakdown
+    } = pricing;
 
     // Create booking
     const booking = await Booking.create({
@@ -205,20 +737,27 @@ const createBooking = async (req, res) => {
       timeSlot: bookingType === 'service' ? timeSlot : undefined,
       guests: guestDetails,
       totalAmount,
-      taxAmount: 0,
-      serviceFee,
-      cleaningFee,
-      securityDeposit,
+      subtotal: subtotal,
+      taxAmount: gst,
+      serviceFee: pricing.serviceFee,
+      cleaningFee: pricing.cleaningFee,
+      securityDeposit: pricing.securityDeposit,
       currency,
       cancellationPolicy,
       specialRequests: specialRequests || undefined,
+      hourlyExtension: hourlyExtension,
+      contactInfo: req.body.contactInfo,
       paymentStatus: 'pending',
       refundAmount: 0,
       refunded: false,
       couponApplied,
-      discountAmount,
+      discountAmount: pricing.discountAmount,
       hostFee: hostEarning,
-      platformFee: platformFee
+      platformFee: platformFee,
+      processingFee: processingFee,
+      gst: gst,
+      // Store complete pricing breakdown
+      pricingBreakdown: breakdown
     });
 
     // Create notification for host
@@ -407,7 +946,7 @@ const getBooking = async (req, res) => {
     const { id } = req.params;
     
     const booking = await Booking.findById(id)
-      .populate('listing', 'title images description location propertyType amenities cancellationPolicy checkInTime checkOutTime bedrooms bathrooms maxGuests')
+      .populate('listing', 'title images description location propertyType amenities cancellationPolicy checkInTime checkOutTime bedrooms bathrooms maxGuests pricing')
       .populate('service', 'title media description pricing cancellationPolicy')
       .populate('user', 'name email profileImage')
       .populate('host', 'name email profileImage about responseTime')
@@ -436,7 +975,7 @@ const getBooking = async (req, res) => {
 
 
 
-    // Calculate fee breakdown for display
+    // Calculate fee breakdown for display (fallback for legacy bookings)
     const feeBreakdown = {
       baseAmount: booking.totalAmount + booking.discountAmount,
       serviceFee: booking.serviceFee,
@@ -514,6 +1053,220 @@ const downloadReceipt = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error generating receipt',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Accept booking request (host only)
+// @route   PUT /api/bookings/:id/accept
+// @access  Private (Host only)
+const acceptBooking = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body; // Optional message from host
+
+    const booking = await Booking.findById(id)
+      .populate('user', 'name email profileImage')
+      .populate('host', 'name email profileImage')
+      .populate('listing', 'title images')
+      .populate('service', 'title images')
+      .populate('payment', 'amount status paymentMethod');
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    // Check if user is the host
+    if (booking.host._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Only the host can accept bookings.'
+      });
+    }
+
+    // Check if booking is in pending status
+    if (booking.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot accept booking. Current status: ${booking.status}`
+      });
+    }
+
+    // Update booking status to confirmed
+    booking.status = 'confirmed';
+    booking.confirmedAt = new Date();
+    if (message) {
+      booking.hostMessage = message;
+    }
+    await booking.save();
+
+    // Create notification for guest
+    await Notification.create({
+      user: booking.user._id,
+      type: 'booking',
+      title: 'Booking Confirmed!',
+      message: `Your booking request has been accepted by ${booking.host.name}.`,
+      relatedEntity: {
+        type: 'Booking',
+        id: booking._id
+      }
+    });
+
+    // Send confirmation email to guest
+    try {
+      await sendHostConfirmedBookingEmail(booking.user.email, {
+        bookingId: booking._id,
+        propertyName: booking.listing?.title || booking.service?.title,
+        hostName: booking.host.name,
+        checkIn: booking.checkIn,
+        checkOut: booking.checkOut,
+        totalAmount: booking.totalAmount,
+        currency: booking.currency,
+        hostMessage: message
+      });
+    } catch (emailError) {
+      console.error('Email sending failed:', emailError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Booking accepted successfully',
+      data: { booking }
+    });
+
+  } catch (error) {
+    console.error('Error accepting booking:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to accept booking',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Reject booking request (host only)
+// @route   PUT /api/bookings/:id/reject
+// @access  Private (Host only)
+const rejectBooking = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, message } = req.body; // Reason and optional message from host
+
+    const booking = await Booking.findById(id)
+      .populate('user', 'name email profileImage')
+      .populate('host', 'name email profileImage')
+      .populate('listing', 'title images')
+      .populate('service', 'title images')
+      .populate('payment', 'amount status paymentMethod');
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    // Check if user is the host
+    if (booking.host._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Only the host can reject bookings.'
+      });
+    }
+
+    // Check if booking is in pending status
+    if (booking.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot reject booking. Current status: ${booking.status}`
+      });
+    }
+
+    // Update booking status to cancelled
+    booking.status = 'cancelled';
+    booking.cancelledAt = new Date();
+    booking.cancellationReason = reason || 'Host rejected the booking';
+    booking.cancelledBy = 'host';
+    if (message) {
+      booking.hostMessage = message;
+    }
+
+    // Process full refund since booking was cancelled before host approval
+    try {
+      const refund = await RefundService.processRefund(
+        booking._id,
+        'host_cancel',
+        'full',
+        {
+          userNotes: `Booking rejected by host: ${reason}`,
+          adminNotes: `Host rejection - ${message || 'No additional message'}`
+        }
+      );
+      
+      console.log(`✅ Full refund processed for rejected booking: ${refund.refundReference}`);
+      console.log(`📋 Refund stored in database with ID: ${refund._id}`);
+      
+      // Update booking with refund details from RefundService
+      booking.refundAmount = refund.amount;
+      booking.refunded = refund.amount > 0;
+      booking.refundStatus = refund.status;
+      booking.paymentStatus = 'refunded';
+    } catch (refundError) {
+      console.error('❌ Error processing refund for rejected booking:', refundError);
+      // Still update booking status even if refund fails
+      booking.refundAmount = booking.totalAmount;
+      booking.refunded = true;
+      booking.refundStatus = 'pending';
+      booking.paymentStatus = 'refunded';
+    }
+    
+    await booking.save();
+
+    // Create notification for guest
+    await Notification.create({
+      user: booking.user._id,
+      type: 'booking',
+      title: 'Booking Request Declined',
+      message: `Your booking request has been declined by ${booking.host.name}. Full refund will be processed.`,
+      relatedEntity: {
+        type: 'Booking',
+        id: booking._id
+      }
+    });
+
+    // Send rejection email to guest
+    try {
+      await sendHostCancelledBookingEmail(booking.user.email, {
+        bookingId: booking._id,
+        propertyName: booking.listing?.title || booking.service?.title,
+        hostName: booking.host.name,
+        checkIn: booking.checkIn,
+        checkOut: booking.checkOut,
+        totalAmount: booking.totalAmount,
+        currency: booking.currency,
+        reason: reason || 'Host rejected the booking',
+        hostMessage: message,
+        refundAmount: booking.refundAmount
+      });
+    } catch (emailError) {
+      console.error('Email sending failed:', emailError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Booking rejected successfully. Full refund will be processed.',
+      data: { booking }
+    });
+
+  } catch (error) {
+    console.error('Error rejecting booking:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to reject booking',
       error: error.message
     });
   }
@@ -1063,86 +1816,64 @@ const cancelBooking = async (req, res) => {
       });
     }
 
-    // Calculate refund based on cancellation policy
-    const cancellationPolicy = booking.listing?.cancellationPolicy || 'moderate';
-    const checkInDate = new Date(booking.checkIn);
-    const now = new Date();
-    const hoursUntilCheckIn = (checkInDate.getTime() - now.getTime()) / (1000 * 60 * 60);
-    const daysUntilCheckIn = Math.ceil(hoursUntilCheckIn / 24);
+    // Determine refund type and reason based on booking status and who is cancelling
+    let refundType = 'partial';
+    let refundReason = 'cancellation';
     
-    let refundAmount = 0;
-    let refundPercentage = 0;
-    let policyDescription = '';
-    let canCancel = true;
-
-    // Determine refund based on policy and time until check-in
-    switch (cancellationPolicy) {
-      case 'flexible':
-        if (hoursUntilCheckIn > 24) {
-          refundPercentage = 100;
-          policyDescription = 'Full refund if cancelled more than 24 hours before check-in';
+    // If booking is pending (before host approval), always give full refund
+    if (booking.status === 'pending') {
+      refundType = 'full';
+      refundReason = 'cancellation'; // User cancellation before host approval
+    } else if (isHost) {
+      // Host is cancelling - always full refund
+      refundType = 'full';
+      refundReason = 'host_cancel';
         } else {
-          refundPercentage = 0;
-          policyDescription = 'No refund if cancelled within 24 hours of check-in';
-        }
-        break;
-      case 'moderate':
-        if (hoursUntilCheckIn > 120) { // 5 days
-          refundPercentage = 100;
-          policyDescription = 'Full refund if cancelled more than 5 days before check-in';
-        } else if (hoursUntilCheckIn > 24) {
-          refundPercentage = 50;
-          policyDescription = '50% refund if cancelled between 1-5 days before check-in';
-        } else {
-          refundPercentage = 0;
-          policyDescription = 'No refund if cancelled within 24 hours of check-in';
-        }
-        break;
-      case 'strict':
-        if (hoursUntilCheckIn > 168) { // 7 days
-          refundPercentage = 50;
-          policyDescription = '50% refund if cancelled more than 7 days before check-in';
-        } else {
-          refundPercentage = 0;
-          policyDescription = 'No refund if cancelled within 7 days of check-in';
-        }
-        break;
-      case 'super_strict':
-        refundPercentage = 0;
-        policyDescription = 'No refunds under any circumstances';
-        break;
-      default:
-        refundPercentage = 0;
-        policyDescription = 'Standard cancellation policy applies';
+      // User is cancelling confirmed booking - use cancellation policy
+      refundType = 'partial'; // RefundService will calculate based on policy
+      refundReason = 'cancellation';
     }
 
-    // Check if cancellation is allowed based on policy
-    if (cancellationPolicy === 'super_strict' && hoursUntilCheckIn <= 168) {
-      canCancel = false;
-    }
-
-    if (!canCancel) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cancellation not allowed according to the host\'s strict policy',
-        data: {
-          cancellationPolicy,
-          policyDescription,
-          daysUntilCheckIn,
-          hoursUntilCheckIn: Math.ceil(hoursUntilCheckIn)
+    // Process refund using RefundService BEFORE updating booking status
+    let refund = null;
+    try {
+      refund = await RefundService.processRefund(
+        booking._id,
+        refundReason,
+        refundType,
+        {
+          userNotes: reason || (isHost ? 'Cancelled by host' : 'Cancelled by user'),
+          adminNotes: `Cancellation - ${isHost ? 'Host cancelled' : 'User cancelled'} ${booking.status === 'pending' ? 'before approval' : 'after confirmation'}`
         }
-      });
+      );
+      
+      console.log(`✅ Refund processed for cancelled booking: ${refund.refundReference}`);
+      console.log(`📋 Refund stored in database with ID: ${refund._id}`);
+      console.log(`💰 Refund amount: ${refund.amount}`);
+    } catch (refundError) {
+      console.error('❌ Error processing refund for cancelled booking:', refundError);
+      // Continue with cancellation even if refund fails
     }
-
-    refundAmount = (booking.totalAmount * refundPercentage) / 100;
 
     // Update booking status
     booking.status = 'cancelled';
     booking.cancellationReason = reason || 'Cancelled by user';
     booking.cancelledAt = new Date();
     booking.cancelledBy = userId;
-    booking.refundAmount = refundAmount;
-    booking.refundStatus = refundAmount > 0 ? 'pending' : 'not_applicable';
+
+    // Update booking with refund details
+    if (refund) {
+      booking.refundAmount = refund.amount;
+      booking.refunded = refund.amount > 0;
+      booking.refundStatus = refund.status;
+      booking.paymentStatus = refund.amount === booking.totalAmount ? 'refunded' : 'partially_refunded';
+    } else {
+      // Fallback if refund creation failed
+      booking.refundAmount = 0;
+      booking.refunded = false;
+      booking.refundStatus = 'not_applicable';
+      booking.paymentStatus = 'refunded';
+    }
 
     await booking.save();
 
@@ -1735,46 +2466,321 @@ const adminDeleteBooking = async (req, res) => {
   }
 };
 
-// @desc    Cleanup expired blocked bookings (utility function)
+// @desc    Cleanup expired blocked bookings and incomplete payment bookings (utility function)
 // @access  Private (Internal use)
+// NOTE: This function only cleans up bookings that are blocked for payment or processing payment
+// It does NOT clean up pending bookings waiting for host approval
 const cleanupExpiredBlockedBookings = async () => {
   try {
-    console.log('🔄 Cleaning up expired blocked bookings...');
+    console.log('🔄 ===========================================');
+    console.log('🔄 CLEANUP EXPIRED BLOCKED/PAYMENT BOOKINGS');
+    console.log('🔄 ===========================================');
     
-    // Find bookings that are blocked and expired (older than 30 minutes)
-    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+    const now = new Date();
+    const threeMinutesAgo = new Date(now.getTime() - 3 * 60 * 1000);
     
+    console.log(`🕐 Current time: ${now.toISOString()}`);
+    console.log(`🕐 Cleanup threshold: ${threeMinutesAgo.toISOString()} (3 minutes ago)`);
+    
+    let totalCleaned = 0;
+    
+    // 1. Clean up incomplete bookings older than 3 minutes
+    // Safety check: Only clean up processing bookings (payment in progress), never pending (waiting for host approval) or confirmed ones
+    console.log('🔍 Step 1: Checking for incomplete payment bookings...');
+    const incompleteBookings = await Booking.find({
+      status: 'processing', // Only processing bookings, not pending ones waiting for host approval
+      createdAt: { $lt: threeMinutesAgo }
+    }).populate('user', 'name email _id').populate('host', 'name email _id');
+
+    console.log(`📊 Found ${incompleteBookings.length} incomplete payment bookings older than 3 minutes`);
+    
+    if (incompleteBookings.length > 0) {
+      console.log('📋 DETAILED BOOKING INFORMATION:');
+      console.log('================================');
+      
+      incompleteBookings.forEach((booking, index) => {
+        console.log(`\n📝 Booking #${index + 1}:`);
+        console.log(`   🆔 Booking ID: ${booking._id}`);
+        console.log(`   👤 User ID: ${booking.user?._id || booking.user}`);
+        console.log(`   👤 User Name: ${booking.user?.name || 'N/A'}`);
+        console.log(`   👤 User Email: ${booking.user?.email || 'N/A'}`);
+        console.log(`   🏠 Host ID: ${booking.host?._id || booking.host}`);
+        console.log(`   🏠 Host Name: ${booking.host?.name || 'N/A'}`);
+        console.log(`   🏠 Host Email: ${booking.host?.email || 'N/A'}`);
+        console.log(`   📊 Status: ${booking.status}`);
+        console.log(`   💰 Total Amount: ₹${booking.totalAmount}`);
+        console.log(`   📅 Created At: ${booking.createdAt.toISOString()}`);
+        console.log(`   ⏰ Age: ${Math.round((now - booking.createdAt) / 1000 / 60)} minutes`);
+        console.log(`   🏠 Property: ${booking.listing || 'N/A'}`);
+        console.log(`   🎯 Service: ${booking.service || 'N/A'}`);
+        console.log(`   📝 Payment Status: ${booking.paymentStatus || 'N/A'}`);
+        console.log(`   🔄 Booking Type: ${booking.bookingType || 'N/A'}`);
+        console.log(`   📅 Check-in: ${booking.checkIn || 'N/A'}`);
+        console.log(`   📅 Check-out: ${booking.checkOut || 'N/A'}`);
+        console.log(`   ⏰ Time Slot: ${booking.timeSlot ? JSON.stringify(booking.timeSlot) : 'N/A'}`);
+        console.log(`   📝 Special Requests: ${booking.specialRequests || 'N/A'}`);
+        console.log(`   👥 Guest Details: ${booking.guestDetails ? JSON.stringify(booking.guestDetails) : 'N/A'}`);
+        console.log(`   🎫 Coupon: ${booking.couponCode || 'N/A'}`);
+        console.log(`   💳 Payment ID: ${booking.payment || 'N/A'}`);
+        console.log(`   🔄 Refund Status: ${booking.refundStatus || 'N/A'}`);
+        console.log(`   🔄 Refund Amount: ₹${booking.refundAmount || 0}`);
+        console.log(`   📝 Cancellation Reason: ${booking.cancellationReason || 'N/A'}`);
+        console.log(`   📅 Cancelled At: ${booking.cancelledAt || 'N/A'}`);
+        console.log(`   ✅ Checked In: ${booking.checkedIn || false}`);
+        console.log(`   ✅ Checked Out: ${booking.checkedOut || false}`);
+        console.log(`   📊 Pricing Breakdown: ${booking.pricingBreakdown ? 'Present' : 'Missing'}`);
+        console.log(`   📊 Subtotal: ₹${booking.subtotal || 0}`);
+        console.log(`   📊 Tax Amount: ₹${booking.taxAmount || 0}`);
+        console.log(`   📊 Platform Fee: ₹${booking.platformFee || 0}`);
+        console.log(`   📊 Processing Fee: ₹${booking.processingFee || 0}`);
+        console.log(`   📊 GST: ₹${booking.gst || 0}`);
+        console.log(`   📊 Host Fee: ₹${booking.hostFee || 0}`);
+        console.log(`   📊 Discount Amount: ₹${booking.discountAmount || 0}`);
+        console.log(`   📊 Host Earning: ₹${booking.hostEarning || 0}`);
+        console.log(`   📊 Cleaning Fee: ₹${booking.cleaningFee || 0}`);
+        console.log(`   📊 Service Fee: ₹${booking.serviceFee || 0}`);
+        console.log(`   📊 Security Deposit: ₹${booking.securityDeposit || 0}`);
+        console.log(`   📊 Hourly Extension: ₹${booking.hourlyExtension || 0}`);
+        console.log(`   📊 Currency: ${booking.currency || 'INR'}`);
+        console.log(`   📊 Cancellation Policy: ${booking.cancellationPolicy || 'N/A'}`);
+        console.log(`   📊 Booking Reference: ${booking.bookingReference || 'N/A'}`);
+        console.log(`   📊 Notes: ${booking.notes || 'N/A'}`);
+        console.log(`   📊 Metadata: ${booking.metadata ? JSON.stringify(booking.metadata) : 'N/A'}`);
+        console.log(`   📅 Updated At: ${booking.updatedAt.toISOString()}`);
+        console.log(`   📅 Last Modified: ${booking.lastModified || 'N/A'}`);
+        console.log(`   🔄 Is Active: ${booking.isActive !== false}`);
+        console.log(`   🔄 Is Deleted: ${booking.isDeleted || false}`);
+        console.log(`   🔄 Deleted At: ${booking.deletedAt || 'N/A'}`);
+        console.log(`   🔄 Deleted By: ${booking.deletedBy || 'N/A'}`);
+        console.log(`   🔄 Deletion Reason: ${booking.deletionReason || 'N/A'}`);
+        console.log(`   🔄 Version: ${booking.__v || 0}`);
+        console.log(`   🔄 Document ID: ${booking.id || 'N/A'}`);
+        console.log(`   🔄 To Object: ${JSON.stringify(booking.toObject ? booking.toObject() : 'N/A')}`);
+        console.log(`   🔄 JSON: ${JSON.stringify(booking, null, 2)}`);
+        console.log('   ========================================');
+      });
+      
+      console.log(`\n🔄 Proceeding to clean up ${incompleteBookings.length} incomplete payment bookings...`);
+      
+      const incompleteResult = await Booking.updateMany(
+        {
+          _id: { $in: incompleteBookings.map(b => b._id) }
+        },
+        {
+          $set: {
+            status: 'cancelled',
+            cancellationReason: 'Expired - booking not completed within 3 minutes',
+            cancelledAt: new Date()
+          }
+        }
+      );
+      
+      totalCleaned += incompleteResult.modifiedCount;
+      console.log(`✅ Successfully cleaned up ${incompleteResult.modifiedCount} incomplete payment bookings`);
+      console.log(`📊 Expected: ${incompleteBookings.length}, Actual: ${incompleteResult.modifiedCount}`);
+    } else {
+      console.log('✅ No incomplete payment bookings found to clean up');
+    }
+    
+    // 2. Clean up blocked bookings older than 3 minutes
+    // Safety check: Only clean up blocked bookings, never confirmed ones
+    console.log('\n🔍 Step 2: Checking for expired blocked bookings...');
     const expiredBlockedBookings = await Booking.find({
       status: 'blocked',
-      createdAt: { $lt: thirtyMinutesAgo }
-    });
+      createdAt: { $lt: threeMinutesAgo }
+    }).populate('user', 'name email _id').populate('host', 'name email _id');
 
-    if (expiredBlockedBookings.length === 0) {
-      console.log('✅ No expired blocked bookings found');
-      return { cleaned: 0 };
-    }
-
-    console.log(`🔄 Found ${expiredBlockedBookings.length} expired blocked bookings to clean up`);
-
-    // Update these bookings to cancelled status
-    const updateResult = await Booking.updateMany(
+    console.log(`📊 Found ${expiredBlockedBookings.length} expired blocked bookings`);
+    
+    if (expiredBlockedBookings.length > 0) {
+      console.log('📋 DETAILED BLOCKED BOOKING INFORMATION:');
+      console.log('========================================');
+      
+      expiredBlockedBookings.forEach((booking, index) => {
+        console.log(`\n📝 Blocked Booking #${index + 1}:`);
+        console.log(`   🆔 Booking ID: ${booking._id}`);
+        console.log(`   👤 User ID: ${booking.user?._id || booking.user}`);
+        console.log(`   👤 User Name: ${booking.user?.name || 'N/A'}`);
+        console.log(`   👤 User Email: ${booking.user?.email || 'N/A'}`);
+        console.log(`   🏠 Host ID: ${booking.host?._id || booking.host}`);
+        console.log(`   🏠 Host Name: ${booking.host?.name || 'N/A'}`);
+        console.log(`   🏠 Host Email: ${booking.host?.email || 'N/A'}`);
+        console.log(`   📊 Status: ${booking.status}`);
+        console.log(`   💰 Total Amount: ₹${booking.totalAmount}`);
+        console.log(`   📅 Created At: ${booking.createdAt.toISOString()}`);
+        console.log(`   ⏰ Age: ${Math.round((now - booking.createdAt) / 1000 / 60)} minutes`);
+        console.log(`   🏠 Property: ${booking.listing || 'N/A'}`);
+        console.log(`   🎯 Service: ${booking.service || 'N/A'}`);
+        console.log(`   📝 Payment Status: ${booking.paymentStatus || 'N/A'}`);
+        console.log(`   🔄 Booking Type: ${booking.bookingType || 'N/A'}`);
+        console.log(`   📅 Check-in: ${booking.checkIn || 'N/A'}`);
+        console.log(`   📅 Check-out: ${booking.checkOut || 'N/A'}`);
+        console.log(`   ⏰ Time Slot: ${booking.timeSlot ? JSON.stringify(booking.timeSlot) : 'N/A'}`);
+        console.log(`   📝 Special Requests: ${booking.specialRequests || 'N/A'}`);
+        console.log(`   👥 Guest Details: ${booking.guestDetails ? JSON.stringify(booking.guestDetails) : 'N/A'}`);
+        console.log(`   🎫 Coupon: ${booking.couponCode || 'N/A'}`);
+        console.log(`   💳 Payment ID: ${booking.payment || 'N/A'}`);
+        console.log(`   🔄 Refund Status: ${booking.refundStatus || 'N/A'}`);
+        console.log(`   🔄 Refund Amount: ₹${booking.refundAmount || 0}`);
+        console.log(`   📝 Cancellation Reason: ${booking.cancellationReason || 'N/A'}`);
+        console.log(`   📅 Cancelled At: ${booking.cancelledAt || 'N/A'}`);
+        console.log(`   ✅ Checked In: ${booking.checkedIn || false}`);
+        console.log(`   ✅ Checked Out: ${booking.checkedOut || false}`);
+        console.log(`   📊 Pricing Breakdown: ${booking.pricingBreakdown ? 'Present' : 'Missing'}`);
+        console.log(`   📊 Subtotal: ₹${booking.subtotal || 0}`);
+        console.log(`   📊 Tax Amount: ₹${booking.taxAmount || 0}`);
+        console.log(`   📊 Platform Fee: ₹${booking.platformFee || 0}`);
+        console.log(`   📊 Processing Fee: ₹${booking.processingFee || 0}`);
+        console.log(`   📊 GST: ₹${booking.gst || 0}`);
+        console.log(`   📊 Host Fee: ₹${booking.hostFee || 0}`);
+        console.log(`   📊 Discount Amount: ₹${booking.discountAmount || 0}`);
+        console.log(`   📊 Host Earning: ₹${booking.hostEarning || 0}`);
+        console.log(`   📊 Cleaning Fee: ₹${booking.cleaningFee || 0}`);
+        console.log(`   📊 Service Fee: ₹${booking.serviceFee || 0}`);
+        console.log(`   📊 Security Deposit: ₹${booking.securityDeposit || 0}`);
+        console.log(`   📊 Hourly Extension: ₹${booking.hourlyExtension || 0}`);
+        console.log(`   📊 Currency: ${booking.currency || 'INR'}`);
+        console.log(`   📊 Cancellation Policy: ${booking.cancellationPolicy || 'N/A'}`);
+        console.log(`   📊 Booking Reference: ${booking.bookingReference || 'N/A'}`);
+        console.log(`   📊 Notes: ${booking.notes || 'N/A'}`);
+        console.log(`   📊 Metadata: ${booking.metadata ? JSON.stringify(booking.metadata) : 'N/A'}`);
+        console.log(`   📅 Updated At: ${booking.updatedAt.toISOString()}`);
+        console.log(`   📅 Last Modified: ${booking.lastModified || 'N/A'}`);
+        console.log(`   🔄 Is Active: ${booking.isActive !== false}`);
+        console.log(`   🔄 Is Deleted: ${booking.isDeleted || false}`);
+        console.log(`   🔄 Deleted At: ${booking.deletedAt || 'N/A'}`);
+        console.log(`   🔄 Deleted By: ${booking.deletedBy || 'N/A'}`);
+        console.log(`   🔄 Deletion Reason: ${booking.deletionReason || 'N/A'}`);
+        console.log(`   🔄 Version: ${booking.__v || 0}`);
+        console.log(`   🔄 Document ID: ${booking.id || 'N/A'}`);
+        console.log(`   🔄 To Object: ${JSON.stringify(booking.toObject ? booking.toObject() : 'N/A')}`);
+        console.log(`   🔄 JSON: ${JSON.stringify(booking, null, 2)}`);
+        console.log('   ========================================');
+      });
+      
+      console.log(`\n🔄 Proceeding to clean up ${expiredBlockedBookings.length} expired blocked bookings...`);
+      
+      const blockedResult = await Booking.updateMany(
       {
         _id: { $in: expiredBlockedBookings.map(b => b._id) }
       },
       {
         $set: {
           status: 'cancelled',
-          cancellationReason: 'Expired - payment not completed within time limit',
+            cancellationReason: 'Expired - payment not completed within 3 minutes',
           cancelledAt: new Date()
         }
       }
     );
 
-    console.log(`✅ Successfully cleaned up ${updateResult.modifiedCount} expired blocked bookings`);
+      totalCleaned += blockedResult.modifiedCount;
+      console.log(`✅ Successfully cleaned up ${blockedResult.modifiedCount} expired blocked bookings`);
+      console.log(`📊 Expected: ${expiredBlockedBookings.length}, Actual: ${blockedResult.modifiedCount}`);
+    } else {
+      console.log('✅ No expired blocked bookings found to clean up');
+    }
+
+    // 3. Check for any pending bookings (should NOT be cleaned up)
+    console.log('\n🔍 Step 3: Checking for pending bookings (should NOT be cleaned up)...');
+    const pendingBookings = await Booking.find({
+      status: 'pending',
+      createdAt: { $lt: threeMinutesAgo }
+    }).populate('user', 'name email _id').populate('host', 'name email _id');
+
+    console.log(`📊 Found ${pendingBookings.length} pending bookings older than 3 minutes (these should NOT be cleaned up)`);
     
-    return { cleaned: updateResult.modifiedCount };
+    if (pendingBookings.length > 0) {
+      console.log('📋 PENDING BOOKING INFORMATION (NOT CLEANED UP):');
+      console.log('==============================================');
+      
+      pendingBookings.forEach((booking, index) => {
+        console.log(`\n📝 Pending Booking #${index + 1} (PROTECTED):`);
+        console.log(`   🆔 Booking ID: ${booking._id}`);
+        console.log(`   👤 User ID: ${booking.user?._id || booking.user}`);
+        console.log(`   👤 User Name: ${booking.user?.name || 'N/A'}`);
+        console.log(`   👤 User Email: ${booking.user?.email || 'N/A'}`);
+        console.log(`   🏠 Host ID: ${booking.host?._id || booking.host}`);
+        console.log(`   🏠 Host Name: ${booking.host?.name || 'N/A'}`);
+        console.log(`   🏠 Host Email: ${booking.host?.email || 'N/A'}`);
+        console.log(`   📊 Status: ${booking.status} (PROTECTED - waiting for host approval)`);
+        console.log(`   💰 Total Amount: ₹${booking.totalAmount}`);
+        console.log(`   📅 Created At: ${booking.createdAt.toISOString()}`);
+        console.log(`   ⏰ Age: ${Math.round((now - booking.createdAt) / 1000 / 60)} minutes`);
+        console.log(`   🏠 Property: ${booking.listing || 'N/A'}`);
+        console.log(`   🎯 Service: ${booking.service || 'N/A'}`);
+        console.log(`   📝 Payment Status: ${booking.paymentStatus || 'N/A'}`);
+        console.log(`   🔄 Booking Type: ${booking.bookingType || 'N/A'}`);
+        console.log(`   📅 Check-in: ${booking.checkIn || 'N/A'}`);
+        console.log(`   📅 Check-out: ${booking.checkOut || 'N/A'}`);
+        console.log(`   ⏰ Time Slot: ${booking.timeSlot ? JSON.stringify(booking.timeSlot) : 'N/A'}`);
+        console.log(`   📝 Special Requests: ${booking.specialRequests || 'N/A'}`);
+        console.log(`   👥 Guest Details: ${booking.guestDetails ? JSON.stringify(booking.guestDetails) : 'N/A'}`);
+        console.log(`   🎫 Coupon: ${booking.couponCode || 'N/A'}`);
+        console.log(`   💳 Payment ID: ${booking.payment || 'N/A'}`);
+        console.log(`   🔄 Refund Status: ${booking.refundStatus || 'N/A'}`);
+        console.log(`   🔄 Refund Amount: ₹${booking.refundAmount || 0}`);
+        console.log(`   📝 Cancellation Reason: ${booking.cancellationReason || 'N/A'}`);
+        console.log(`   📅 Cancelled At: ${booking.cancelledAt || 'N/A'}`);
+        console.log(`   ✅ Checked In: ${booking.checkedIn || false}`);
+        console.log(`   ✅ Checked Out: ${booking.checkedOut || false}`);
+        console.log(`   📊 Pricing Breakdown: ${booking.pricingBreakdown ? 'Present' : 'Missing'}`);
+        console.log(`   📊 Subtotal: ₹${booking.subtotal || 0}`);
+        console.log(`   📊 Tax Amount: ₹${booking.taxAmount || 0}`);
+        console.log(`   📊 Platform Fee: ₹${booking.platformFee || 0}`);
+        console.log(`   📊 Processing Fee: ₹${booking.processingFee || 0}`);
+        console.log(`   📊 GST: ₹${booking.gst || 0}`);
+        console.log(`   📊 Host Fee: ₹${booking.hostFee || 0}`);
+        console.log(`   📊 Discount Amount: ₹${booking.discountAmount || 0}`);
+        console.log(`   📊 Host Earning: ₹${booking.hostEarning || 0}`);
+        console.log(`   📊 Cleaning Fee: ₹${booking.cleaningFee || 0}`);
+        console.log(`   📊 Service Fee: ₹${booking.serviceFee || 0}`);
+        console.log(`   📊 Security Deposit: ₹${booking.securityDeposit || 0}`);
+        console.log(`   📊 Hourly Extension: ₹${booking.hourlyExtension || 0}`);
+        console.log(`   📊 Currency: ${booking.currency || 'INR'}`);
+        console.log(`   📊 Cancellation Policy: ${booking.cancellationPolicy || 'N/A'}`);
+        console.log(`   📊 Booking Reference: ${booking.bookingReference || 'N/A'}`);
+        console.log(`   📊 Notes: ${booking.notes || 'N/A'}`);
+        console.log(`   📊 Metadata: ${booking.metadata ? JSON.stringify(booking.metadata) : 'N/A'}`);
+        console.log(`   📅 Updated At: ${booking.updatedAt.toISOString()}`);
+        console.log(`   📅 Last Modified: ${booking.lastModified || 'N/A'}`);
+        console.log(`   🔄 Is Active: ${booking.isActive !== false}`);
+        console.log(`   🔄 Is Deleted: ${booking.isDeleted || false}`);
+        console.log(`   🔄 Deleted At: ${booking.deletedAt || 'N/A'}`);
+        console.log(`   🔄 Deleted By: ${booking.deletedBy || 'N/A'}`);
+        console.log(`   🔄 Deletion Reason: ${booking.deletionReason || 'N/A'}`);
+        console.log(`   🔄 Version: ${booking.__v || 0}`);
+        console.log(`   🔄 Document ID: ${booking.id || 'N/A'}`);
+        console.log(`   🔄 To Object: ${JSON.stringify(booking.toObject ? booking.toObject() : 'N/A')}`);
+        console.log(`   🔄 JSON: ${JSON.stringify(booking, null, 2)}`);
+        console.log('   ========================================');
+      });
+    } else {
+      console.log('✅ No pending bookings found (all good)');
+    }
+
+    // 4. Final summary
+    console.log('\n📊 ===========================================');
+    console.log('📊 CLEANUP SUMMARY');
+    console.log('📊 ===========================================');
+    console.log(`📊 Total incomplete payment bookings found: ${incompleteBookings.length}`);
+    console.log(`📊 Total expired blocked bookings found: ${expiredBlockedBookings.length}`);
+    console.log(`📊 Total pending bookings found (protected): ${pendingBookings.length}`);
+    console.log(`📊 Total bookings cleaned up: ${totalCleaned}`);
+    console.log(`📊 Cleanup threshold: ${threeMinutesAgo.toISOString()}`);
+    console.log(`📊 Current time: ${now.toISOString()}`);
+    console.log('📊 ===========================================');
+
+    if (totalCleaned === 0) {
+      console.log('✅ No expired blocked/payment bookings found');
+    } else {
+      console.log(`✅ Total cleaned up: ${totalCleaned} expired blocked/payment bookings`);
+    }
+    
+    return { cleaned: totalCleaned };
   } catch (error) {
-    console.error('❌ Error cleaning up expired blocked bookings:', error);
+    console.error('❌ Error cleaning up expired bookings:', error);
+    console.error('❌ Error stack:', error.stack);
+    console.error('❌ Error details:', JSON.stringify(error, null, 2));
     throw error;
   }
 };
@@ -1953,8 +2959,448 @@ const releaseBookingDates = async (req, res) => {
   }
 };
 
+// @desc    Calculate hourly booking price
+// @route   POST /api/bookings/calculate-hourly-price
+// @access  Public
+const calculateHourlyPrice = async (req, res) => {
+  try {
+    const {
+      propertyId,
+      checkIn,
+      checkOut,
+      hourlyExtension,
+      guests
+    } = req.body;
+
+    // Validate required fields
+    if (!propertyId || !checkIn || !checkOut) {
+      return res.status(400).json({
+        success: false,
+        message: 'Property ID, check-in, and check-out dates are required'
+      });
+    }
+
+    // Find property
+    const property = await Property.findById(propertyId);
+    if (!property) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+
+    // Check if hourly booking is enabled
+    if (!property.hourlyBooking?.enabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'Hourly booking is not enabled for this property'
+      });
+    }
+
+    // Calculate pricing using centralized system
+    const pricingParams = {
+      basePrice: property.pricing.basePrice,
+      nights: Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)),
+      extraGuestPrice: property.pricing.extraGuestPrice || 0,
+      extraGuests: guests && guests.adults > 1 ? guests.adults - 1 : 0,
+      cleaningFee: property.pricing.cleaningFee || 0,
+      serviceFee: property.pricing.serviceFee || 0,
+      securityDeposit: property.pricing.securityDeposit || 0,
+      hourlyExtension: hourlyExtension ? calculateHourlyExtension(property.pricing.basePrice, hourlyExtension) : 0,
+      discountAmount: 0,
+      currency: property.pricing.currency
+    };
+
+    // Validate minimum stay
+    if (pricingParams.nights < property.hourlyBooking.minStayDays) {
+      return res.status(400).json({
+        success: false,
+        message: `Minimum stay required: ${property.hourlyBooking.minStayDays} days`
+      });
+    }
+
+    // Calculate final pricing breakdown
+    const pricing = await calculatePricingBreakdown(pricingParams);
+
+    // Create hourly-specific breakdown for display
+    const hourlyBreakdown = hourlyExtension ? {
+      hours: hourlyExtension,
+      rate: property.hourlyBooking.hourlyRates?.[`${hourlyExtension === 6 ? 'six' : hourlyExtension === 12 ? 'twelve' : 'eighteen'}Hours`] || 0,
+      description: `${hourlyExtension}-hour extension (${toTwoDecimals((property.hourlyBooking.hourlyRates?.[`${hourlyExtension === 6 ? 'six' : hourlyExtension === 12 ? 'twelve' : 'eighteen'}Hours`] || 0) * 100)}% of daily rate)`,
+      total: pricing.hourlyExtension
+    } : null;
+
+    const breakdown = {
+      daily: {
+        nights: pricingParams.nights,
+        basePrice: pricing.baseAmount,
+        extraGuests: pricing.extraGuestCost,
+        total: pricing.baseAmount + pricing.extraGuestCost
+      },
+      hourly: hourlyBreakdown,
+      fees: {
+        cleaningFee: pricing.cleaningFee,
+        serviceFee: pricing.serviceFee,
+        securityDeposit: pricing.securityDeposit,
+        platformFee: pricing.platformFee,
+        hostEarning: pricing.hostEarning
+      },
+      totals: {
+        subtotal: pricing.subtotal,
+        total: pricing.totalAmount
+      }
+    };
+
+    res.status(200).json({
+      success: true,
+      data: {
+        breakdown,
+        currency: property.pricing.currency,
+        checkInTime: property.checkInTime || '15:00',
+        checkOutTime: property.checkOutTime || '11:00'
+      }
+    });
+
+  } catch (error) {
+    console.error('Hourly price calculation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error calculating hourly price',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get hourly booking settings for a property
+// @route   GET /api/bookings/property/:id/hourly-settings
+// @access  Public
+const getHourlySettings = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const property = await Property.findById(id).select('hourlyBooking checkInTime checkOutTime');
+    if (!property) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        hourlyBooking: property.hourlyBooking,
+        checkInTime: property.checkInTime || '15:00',
+        checkOutTime: property.checkOutTime || '11:00'
+      }
+    });
+
+  } catch (error) {
+    console.error('Get hourly settings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching hourly settings',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Process security deposit refund
+// @route   POST /api/bookings/:id/refund-security-deposit
+// @access  Private (Host only)
+const refundSecurityDeposit = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, notes } = req.body;
+
+    const booking = await Booking.findById(id)
+      .populate('user', 'name email')
+      .populate('host', 'name email')
+      .populate('payment');
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    // Check if user is the host
+    if (booking.host._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Only the host can refund security deposit.'
+      });
+    }
+
+    // Check if booking is completed or cancelled
+    if (!['completed', 'cancelled'].includes(booking.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Security deposit can only be refunded for completed or cancelled bookings'
+      });
+    }
+
+    // Process security deposit refund
+    const refund = await RefundService.processRefund(
+      booking._id,
+      'guest_request',
+      'security_deposit_only',
+      {
+        userNotes: `Security deposit refund requested by host: ${reason || 'No reason provided'}`,
+        adminNotes: `Host notes: ${notes || 'No additional notes'}`
+      }
+    );
+
+    // Create notification for guest
+    await Notification.create({
+      user: booking.user._id,
+      type: 'refund',
+      title: 'Security Deposit Refund Processed',
+      message: `Your security deposit of ₹${refund.amount} has been refunded. It will be credited to your original payment method within 3-5 business days.`,
+      relatedEntity: {
+        type: 'Refund',
+        id: refund._id
+      }
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Security deposit refund processed successfully',
+      data: { 
+        refund,
+        message: `Security deposit refund of ₹${refund.amount} has been processed.`
+      }
+    });
+  } catch (error) {
+    console.error('Error processing security deposit refund:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing security deposit refund',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get refund history for user
+// @route   GET /api/bookings/refunds
+// @access  Private
+const getRefundHistory = async (req, res) => {
+  try {
+    const { page = 1, limit = 10, status } = req.query;
+    
+    const refundHistory = await RefundService.getRefundHistory(req.user._id, {
+      page: parseInt(page),
+      limit: parseInt(limit),
+      status
+    });
+
+    res.status(200).json({
+      success: true,
+      data: refundHistory
+    });
+  } catch (error) {
+    console.error('Error fetching refund history:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching refund history',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get refund details for a specific booking
+// @route   GET /api/bookings/:id/refund
+// @access  Private
+const getBookingRefund = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if user can access this booking
+    const booking = await Booking.findById(id)
+      .populate('user', 'name email')
+      .populate('host', 'name email');
+    
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+    
+    // Check authorization
+    const isBookingOwner = booking.user && (
+      (typeof booking.user === 'string' && booking.user === req.user._id.toString()) ||
+      (booking.user._id && booking.user._id.toString() === req.user._id.toString())
+    );
+    
+    const isHost = booking.host && (
+      (typeof booking.host === 'string' && booking.host === req.user._id.toString()) ||
+      (booking.host._id && booking.host._id.toString() === req.user._id.toString())
+    );
+    
+    if (!isBookingOwner && !isHost && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. You can only view refunds for your own bookings.'
+      });
+    }
+    
+    // Get refund details from Refund model
+    const Refund = require('../models/Refund');
+    const refunds = await Refund.find({ booking: id })
+      .populate('payment', 'amount paymentMethod status')
+      .sort({ createdAt: -1 });
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        booking: {
+          _id: booking._id,
+          status: booking.status,
+          totalAmount: booking.totalAmount,
+          refundAmount: booking.refundAmount,
+          refunded: booking.refunded,
+          refundStatus: booking.refundStatus
+        },
+        refunds: refunds
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching booking refund details',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get all pending refunds (admin only)
+// @route   GET /api/bookings/admin/refunds/pending
+// @access  Private (Admin only)
+const getPendingRefunds = async (req, res) => {
+  try {
+    const { page = 1, limit = 20, reason, type } = req.query;
+    
+    const pendingRefunds = await RefundService.getPendingRefunds({
+      page: parseInt(page),
+      limit: parseInt(limit),
+      reason,
+      type
+    });
+    
+    res.status(200).json({
+      success: true,
+      data: pendingRefunds
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching pending refunds',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Admin approve refund
+// @route   PUT /api/bookings/admin/refunds/:id/approve
+// @access  Private (Admin only)
+const approveRefund = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNotes } = req.body;
+    
+    const refund = await RefundService.approveRefund(id, req.user._id, adminNotes);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Refund approved successfully',
+      data: refund
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error approving refund',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Admin reject refund
+// @route   PUT /api/bookings/admin/refunds/:id/reject
+// @access  Private (Admin only)
+const rejectRefund = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNotes } = req.body;
+    
+    const refund = await RefundService.rejectRefund(id, req.user._id, adminNotes);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Refund rejected successfully',
+      data: refund
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error rejecting refund',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Admin mark refund as processing
+// @route   PUT /api/bookings/admin/refunds/:id/processing
+// @access  Private (Admin only)
+const markRefundAsProcessing = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNotes } = req.body;
+    
+    const refund = await RefundService.markRefundAsProcessing(id, req.user._id, adminNotes);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Refund marked as processing successfully',
+      data: refund
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error marking refund as processing',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Admin mark refund as completed
+// @route   PUT /api/bookings/admin/refunds/:id/complete
+// @access  Private (Admin only)
+const markRefundAsCompleted = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNotes } = req.body;
+    
+    const refund = await RefundService.markRefundAsCompleted(id, req.user._id, adminNotes);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Refund marked as completed successfully',
+      data: refund
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error marking refund as completed',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   // Guest functions
+  processPaymentAndCreateBooking,
   createBooking,
   getMyBookings,
   getBookingById: getBooking,
@@ -1964,6 +3410,8 @@ module.exports = {
   
   // Host functions
   getHostBookings,
+  acceptBooking,
+  rejectBooking,
   updateBookingStatus,
   checkInGuest,
   getBookingStats,
@@ -1978,8 +3426,24 @@ module.exports = {
   // Shared functions
   calculateBookingPrice,
   
+  // Hourly booking functions
+  calculateHourlyPrice,
+  getHourlySettings,
+  
   // Utility functions
   cleanupExpiredBlockedBookings,
+  
+  // Refund functions
+  refundSecurityDeposit,
+  getRefundHistory,
+  getBookingRefund,
+  
+  // Admin refund management
+  getPendingRefunds,
+  approveRefund,
+  rejectRefund,
+  markRefundAsProcessing,
+  markRefundAsCompleted,
   
   // Legacy aliases for backward compatibility
   getBooking,

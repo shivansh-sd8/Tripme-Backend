@@ -96,24 +96,24 @@ const becomeHost = async (req, res) => {
       });
     }
 
-    // Check if user has submitted KYC documents
-    if (!user.kyc || user.kyc.status === 'not_submitted') {
+    // Check if user has submitted KYC documents (only if not already verified)
+    if (!user.isVerified && (!user.kyc || user.kyc.status === 'not_submitted')) {
       return res.status(400).json({
         success: false,
         message: 'Please submit KYC documents before applying to become a host'
       });
     }
 
-    // Check if KYC is pending
-    if (user.kyc.status === 'pending') {
+    // Check if KYC is pending (only if not already verified)
+    if (!user.isVerified && user.kyc && user.kyc.status === 'pending') {
       return res.status(400).json({
         success: false,
         message: 'Your KYC application is under review. Please wait for approval.'
       });
     }
 
-    // Check if KYC was rejected
-    if (user.kyc.status === 'rejected') {
+    // Check if KYC was rejected (only if not already verified)
+    if (!user.isVerified && user.kyc && user.kyc.status === 'rejected') {
       return res.status(400).json({
         success: false,
         message: 'Your KYC was rejected. Please submit new documents and try again.'
@@ -121,7 +121,7 @@ const becomeHost = async (req, res) => {
     }
 
     // If KYC is verified, upgrade to host
-    if (user.kyc.status === 'verified') {
+    if (user.isVerified || user.kyc.status === 'verified') {
       user.role = 'host';
       await user.save();
 

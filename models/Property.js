@@ -37,6 +37,7 @@ const propertySchema = new mongoose.Schema({
       }
     },
     address: String,
+    userAddress: String, // User's own address description
     city: String,
     state: String,
     country: String,
@@ -129,6 +130,37 @@ const propertySchema = new mongoose.Schema({
       default: 0,
       min: 0,
       max: 100
+    }
+  },
+  hourlyBooking: {
+    enabled: {
+      type: Boolean,
+      default: false
+    },
+    minStayDays: {
+      type: Number,
+      default: 1,
+      min: 1
+    },
+    hourlyRates: {
+      sixHours: {
+        type: Number,
+        default: 0.30,
+        min: 0,
+        max: 1
+      },
+      twelveHours: {
+        type: Number,
+        default: 0.60,
+        min: 0,
+        max: 1
+      },
+      eighteenHours: {
+        type: Number,
+        default: 0.75,
+        min: 0,
+        max: 1
+      }
     }
   },
   houseRules: [{

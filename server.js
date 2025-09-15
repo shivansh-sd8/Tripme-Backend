@@ -31,28 +31,26 @@ console.log('Frontend URL:', process.env.FRONTEND_URL);
 connectDB();
 
 // Setup periodic cleanup of expired blocked bookings
-const { cleanupExpiredBlockedBookings } = require('./controllers/booking.controller');
+const bookingController = require('./controllers/booking.controller');
+const availabilityController = require('./controllers/availability.controller');
 
-// Setup periodic cleanup of expired blocked availability
-const { cleanupExpiredBlockedAvailability } = require('./controllers/availability.controller');
-
-// Run cleanup every 5 minutes for more responsive cleanup
+// Run cleanup every 3 minutes for more responsive cleanup
 setInterval(async () => {
   try {
     console.log('🔄 Running periodic cleanup...');
-    await cleanupExpiredBlockedBookings();
-    await cleanupExpiredBlockedAvailability();
+    await bookingController.cleanupExpiredBlockedBookings();
+    await availabilityController.cleanupExpiredBlockedAvailability();
   } catch (error) {
     console.error('Error in periodic cleanup:', error);
   }
-}, 5 * 60 * 1000); // 5 minutes
+}, 3 * 60 * 1000); // 3 minutes
 
 // Also run cleanup on startup
 setTimeout(async () => {
   try {
     console.log('🚀 Running startup cleanup...');
-    await cleanupExpiredBlockedBookings();
-    await cleanupExpiredBlockedAvailability();
+    await bookingController.cleanupExpiredBlockedBookings();
+    await availabilityController.cleanupExpiredBlockedAvailability();
   } catch (error) {
     console.error('Error in startup cleanup:', error);
   }
@@ -66,7 +64,7 @@ const rateLimiters = createRateLimiters();
 const corsOptions = {
   origin: process.env.ALLOWED_ORIGINS ? 
     process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()).filter(url => url) : 
-    ['https://tripme-frontend.vercel.app', 'https://www.tripme-frontend.vercel.app'],
+    ['http://localhost:3000'], // Default fallback for local development only
   credentials: true,
   optionsSuccessStatus: 200
 };
@@ -85,6 +83,47 @@ app.use('/api/auth', rateLimiters.login);
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  const healthCheck = {
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV,
+    version: process.env.npm_package_version || '1.0.0',
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    memory: {
+      used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + ' MB',
+      total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024) + ' MB'
+    }
+  };
+  
+  res.status(200).json(healthCheck);
+});
+
+// Public API endpoints (no authentication required)
+app.get('/api/public/platform-fee', async (req, res) => {
+  try {
+    const PricingConfig = require('./models/PricingConfig');
+    const currentRate = await PricingConfig.getCurrentPlatformFeeRate();
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        platformFeeRate: currentRate,
+        platformFeePercentage: (currentRate * 100).toFixed(1),
+        lastUpdated: new Date()
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching platform fee rate:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch platform fee rate'
+    });
+  }
 });
 
 // API Routes
@@ -106,6 +145,7 @@ app.use('/api/coupons', require('./routes/coupon.routes'));
 app.use('/api/support', require('./routes/support.routes'));
 app.use('/api/upload', require('./routes/upload.routes'));
 app.use('/api/availability', require('./routes/availability.routes'));
+// Hourly booking routes moved to main booking routes
 
 // Health check route
 app.get('/health', (req, res) => {

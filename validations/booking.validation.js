@@ -33,35 +33,32 @@ const validateBooking = (req, res, next) => {
         'date.greater': 'Check-out date must be after check-in date',
         'any.required': 'Check-out date is required'
       }),
-    guests: Joi.any().custom((value, helpers) => {
-      // Handle number format
-      if (typeof value === 'number') {
-        if (value < 1 || value > 20) {
-          return helpers.error('any.invalid', { message: 'Number of guests must be between 1 and 20' });
-        }
-        return value;
-      }
-      
-      // Handle object format
-      if (typeof value === 'object' && value !== null) {
-        const { adults, children = 0, infants = 0 } = value;
-        
-        if (typeof adults !== 'number' || adults < 1 || adults > 20) {
-          return helpers.error('any.invalid', { message: 'Number of adults must be between 1 and 20' });
-        }
-        
-        if (typeof children !== 'number' || children < 0 || children > 10) {
-          return helpers.error('any.invalid', { message: 'Number of children must be between 0 and 10' });
-        }
-        
-        if (typeof infants !== 'number' || infants < 0 || infants > 5) {
-          return helpers.error('any.invalid', { message: 'Number of infants must be between 0 and 5' });
-        }
-        
-        return value;
-      }
-      
-      return helpers.error('any.invalid', { message: 'Guests must be a number or an object with adults, children, and infants' });
+    guests: Joi.object({
+      adults: Joi.number()
+        .min(1)
+        .max(20)
+        .required()
+        .messages({
+          'number.min': 'At least 1 adult is required',
+          'number.max': 'Maximum 20 adults allowed',
+          'any.required': 'Number of adults is required'
+        }),
+      children: Joi.number()
+        .min(0)
+        .max(10)
+        .default(0)
+        .messages({
+          'number.min': 'Children count cannot be negative',
+          'number.max': 'Maximum 10 children allowed'
+        }),
+      infants: Joi.number()
+        .min(0)
+        .max(5)
+        .default(0)
+        .messages({
+          'number.min': 'Infants count cannot be negative',
+          'number.max': 'Maximum 5 infants allowed'
+        })
     }).required(),
     specialRequests: Joi.string()
       .max(1000)
@@ -74,24 +71,27 @@ const validateBooking = (req, res, next) => {
       name: Joi.string()
         .min(2)
         .max(100)
-        .optional()
+        .required()
         .messages({
           'string.min': 'Contact name must be at least 2 characters',
-          'string.max': 'Contact name cannot exceed 100 characters'
+          'string.max': 'Contact name cannot exceed 100 characters',
+          'any.required': 'Contact name is required'
         }),
       phone: Joi.string()
         .pattern(/^\+?[\d\s\-\(\)]+$/)
-        .optional()
+        .required()
         .messages({
-          'string.pattern.base': 'Please provide a valid phone number'
+          'string.pattern.base': 'Please provide a valid phone number',
+          'any.required': 'Phone number is required'
         }),
       email: Joi.string()
         .email()
-        .optional()
+        .required()
         .messages({
-          'string.email': 'Please provide a valid email address'
+          'string.email': 'Please provide a valid email address',
+          'any.required': 'Email address is required'
         })
-    }).optional(),
+    }).required(),
     paymentMethod: Joi.string()
       .valid('card', 'paypal', 'apple_pay', 'google_pay')
       .optional()
@@ -106,16 +106,103 @@ const validateBooking = (req, res, next) => {
         'string.max': 'Coupon code cannot exceed 20 characters'
       }),
     agreeToTerms: Joi.boolean()
-      .valid(true)
       .optional()
       .messages({
-        'any.only': 'You must agree to the terms and conditions'
-      })
+        'boolean.base': 'Terms agreement must be a boolean value'
+      }),
+    hourlyExtension: Joi.object({
+      hours: Joi.number()
+        .valid(6, 12, 18)
+        .optional()
+        .messages({
+          'any.only': 'Hourly extension must be 6, 12, or 18 hours'
+        }),
+      rate: Joi.number()
+        .min(0)
+        .max(1)
+        .optional()
+        .messages({
+          'number.min': 'Hourly rate must be between 0 and 1',
+          'number.max': 'Hourly rate must be between 0 and 1'
+        }),
+      totalHours: Joi.number()
+        .min(0)
+        .optional()
+        .messages({
+          'number.min': 'Total hours cannot be negative'
+        })
+    }).optional(),
+    // Security fields
+    idempotencyKey: Joi.string()
+      .optional()
+      .messages({
+        'string.base': 'Idempotency key must be a string'
+      }),
+    paymentData: Joi.object({
+      amount: Joi.number()
+        .min(0.01)
+        .optional()
+        .messages({
+          'number.min': 'Payment amount must be greater than 0'
+        }),
+      currency: Joi.string()
+        .valid('INR', 'USD', 'EUR', 'GBP')
+        .optional()
+        .messages({
+          'any.only': 'Currency must be one of: INR, USD, EUR, GBP'
+        }),
+      subtotal: Joi.number()
+        .min(0)
+        .optional()
+        .messages({
+          'number.min': 'Subtotal cannot be negative'
+        }),
+      platformFee: Joi.number()
+        .min(0)
+        .optional()
+        .messages({
+          'number.min': 'Platform fee cannot be negative'
+        }),
+      gst: Joi.number()
+        .min(0)
+        .optional()
+        .messages({
+          'number.min': 'GST cannot be negative'
+        }),
+      processingFee: Joi.number()
+        .min(0)
+        .optional()
+        .messages({
+          'number.min': 'Processing fee cannot be negative'
+        }),
+      discountAmount: Joi.number()
+        .min(0)
+        .optional()
+        .messages({
+          'number.min': 'Discount amount cannot be negative'
+        })
+    }).optional(),
+    securityMetadata: Joi.object({
+      userAgent: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'User agent must be a string'
+        }),
+      timestamp: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'Timestamp must be a string'
+        }),
+      clientVersion: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'Client version must be a string'
+        })
+    }).optional()
   });
 
   const { error } = schema.validate(req.body);
   if (error) {
-
     return res.status(400).json({
       success: false,
       message: 'Validation error',
@@ -223,6 +310,28 @@ const validateBookingUpdate = (req, res, next) => {
         .optional()
         .messages({
           'string.email': 'Please provide a valid email address'
+        })
+    }).optional(),
+    hourlyExtension: Joi.object({
+      hours: Joi.number()
+        .valid(6, 12, 18)
+        .optional()
+        .messages({
+          'any.only': 'Hourly extension must be 6, 12, or 18 hours'
+        }),
+      rate: Joi.number()
+        .min(0)
+        .max(1)
+        .optional()
+        .messages({
+          'number.min': 'Hourly rate must be between 0 and 1',
+          'number.max': 'Hourly rate must be between 0 and 1'
+        }),
+      totalHours: Joi.number()
+        .min(0)
+        .optional()
+        .messages({
+          'number.min': 'Total hours cannot be negative'
         })
     }).optional()
   });
