@@ -165,14 +165,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Serve static files from frontend build (if exists)
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../frontend/out')));
-
-  app.get('/*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/out/index.html'));
-  });
-}
+// Note: Frontend is deployed separately on Vercel
+// No need for static file serving or catch-all routes
 
 // Error handling middleware
 const { errorHandler, notFound } = require('./middlewares/error.middleware');
