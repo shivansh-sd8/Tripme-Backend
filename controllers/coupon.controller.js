@@ -547,10 +547,12 @@ const getPublicActiveCoupons = async (req, res) => {
   try {
     const { limit = 6, isActive = true } = req.query;
 
+    // More lenient query - remove strict date filtering for now
     const query = {
-      isActive: isActive === 'true',
-      validFrom: { $lte: new Date() },
-      validTo: { $gte: new Date() }
+      isActive: isActive === 'true'
+      // Temporarily remove date filtering to see all active coupons
+      // validFrom: { $lte: new Date() },
+      // validTo: { $gte: new Date() }
     };
 
     const coupons = await Coupon.find(query)
