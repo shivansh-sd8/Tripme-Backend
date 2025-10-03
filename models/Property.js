@@ -247,6 +247,22 @@ const propertySchema = new mongoose.Schema({
     enum: ['draft', 'published', 'suspended', 'deleted'],
     default: 'draft'
   },
+  approvalStatus: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected'],
+    default: 'pending'
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  approvedAt: {
+    type: Date
+  },
+  approvalReason: {
+    type: String,
+    maxlength: [500, 'Approval reason cannot exceed 500 characters']
+  },
   rejectionReason: {
     type: String,
     maxlength: [500, 'Rejection reason cannot exceed 500 characters']
@@ -285,6 +301,7 @@ propertySchema.index({ isFeatured: 1 });
 propertySchema.index({ isSponsored: 1 });
 propertySchema.index({ isTopRated: 1 });
 propertySchema.index({ status: 1 });
+propertySchema.index({ approvalStatus: 1 });
 
 // Virtuals
 propertySchema.virtual('reviews', {

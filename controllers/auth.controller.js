@@ -115,9 +115,18 @@ const loginUser = async (req, res) => {
 
     // Check if account is active
     if (user.accountStatus !== 'active') {
+      let message = 'Account is not active';
+      if (user.accountStatus === 'suspended') {
+        message = 'Account is suspended. Please contact support.';
+      } else if (user.accountStatus === 'banned') {
+        message = 'Account is banned. Access denied.';
+      } else if (user.accountStatus === 'deactivated') {
+        message = 'Account is deactivated. Please contact support to reactivate.';
+      }
+      
       return res.status(401).json({
         success: false,
-        message: 'Account is suspended or deactivated'
+        message
       });
     }
 

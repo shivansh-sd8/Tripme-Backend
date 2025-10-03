@@ -71,7 +71,7 @@ const submitKYC = async (req, res) => {
         type: identityDocument,
         number: documentNumber,
         frontImage: documentImage,
-        backImage: documentImage, // For now, using same image for both sides
+        backImage: documentImage, // Using same image for both sides for now
         expiryDate: null // Can be added later
       },
       addressProof: {
@@ -347,10 +347,7 @@ const verifyKYC = async (req, res) => {
       user.kyc.rejectionReason = rejectionReason;
     }
 
-    // If approved, mark user as verified
-    if (status === 'verified') {
-      user.isVerified = true;
-    }
+    // KYC status is already set above
 
     await user.save();
 

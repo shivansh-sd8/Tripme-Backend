@@ -401,6 +401,65 @@ const validateResendVerification = (req, res, next) => {
   next();
 };
 
+// Admin signup validation
+const validateAdminSignup = (req, res, next) => {
+  const schema = Joi.object({
+    name: Joi.string()
+      .min(2)
+      .max(50)
+      .required()
+      .messages({
+        'string.min': 'Name must be at least 2 characters long',
+        'string.max': 'Name cannot exceed 50 characters',
+        'any.required': 'Name is required'
+      }),
+    email: Joi.string()
+      .email()
+      .required()
+      .messages({
+        'string.email': 'Please provide a valid email address',
+        'any.required': 'Email is required'
+      }),
+    phone: Joi.string()
+      .pattern(/^\+?[\d\s\-\(\)]+$/)
+      .optional()
+      .messages({
+        'string.pattern.base': 'Please provide a valid phone number'
+      }),
+    password: Joi.string()
+      .min(12)
+      .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/)
+      .required()
+      .messages({
+        'string.min': 'Password must be at least 12 characters long',
+        'string.pattern.base': 'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character',
+        'any.required': 'Password is required'
+      }),
+    confirmPassword: Joi.string()
+      .valid(Joi.ref('password'))
+      .required()
+      .messages({
+        'any.only': 'Passwords do not match',
+        'any.required': 'Password confirmation is required'
+      }),
+    secretKey: Joi.string()
+      .required()
+      .messages({
+        'any.required': 'Secret key is required'
+      })
+  });
+
+  const { error } = schema.validate(req.body);
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation error',
+      errors: error.details.map(detail => detail.message)
+    });
+  }
+  next();
+};
+
 module.exports = {
   validateRegistration,
   validateLogin,
@@ -411,5 +470,6 @@ module.exports = {
   validateSocialLogin,
   validate2FA,
   validateEmailVerification,
-  validateResendVerification
+  validateResendVerification,
+  validateAdminSignup
 }; 

@@ -107,7 +107,7 @@ const userSchema = new mongoose.Schema({
   }],
   accountStatus: {
     type: String,
-    enum: ['active', 'suspended', 'deactivated'],
+    enum: ['active', 'suspended', 'banned', 'deactivated'],
     default: 'active'
   },
   socialLogins: {

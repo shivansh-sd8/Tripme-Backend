@@ -3,12 +3,13 @@ const router = express.Router();
 const { protect } = require('../middlewares/auth.middleware');
 const { isAdmin } = require('../middlewares/authorization.middleware');
 const authController = require('../controllers/auth.controller');
-const { validateLogin } = require('../validations/auth.validation');
+const { validateLogin, validateAdminSignup } = require('../validations/auth.validation');
 
 // Import admin controllers
 const adminController = require('../controllers/admin.controller');
 
 // Public admin routes (no authentication required)
+router.post('/signup', validateAdminSignup, adminController.adminSignup);
 router.post('/login', validateLogin, authController.adminLogin);
 router.get('/pricing/platform-fee/public', adminController.getCurrentPlatformFeeRate);
 
@@ -25,7 +26,11 @@ router.put('/pricing/platform-fee', adminController.updatePlatformFeeRate);
 router.get('/pricing/platform-fee/history', adminController.getPlatformFeeHistory);
 
 // User management routes
-router.get('/users', adminController.getUsers);
+router.get('/users', (req, res, next) => {
+  console.log('🔍 Admin users route hit');
+  console.log('🔍 Request user:', req.user);
+  next();
+}, adminController.getUsers);
 router.put('/users/:userId/status', adminController.updateUserStatus);
 router.get('/users/:userId', adminController.getUser);
 router.put('/users/:userId', adminController.updateUser);

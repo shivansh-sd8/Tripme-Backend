@@ -126,9 +126,17 @@ app.get('/api/public/platform-fee', async (req, res) => {
   }
 });
 
+// Test endpoint
+app.get('/api/test', (req, res) => {
+  res.json({ success: true, message: 'Server is working' });
+});
+
 // API Routes
+console.log('🔍 Loading auth routes...');
 app.use('/api/auth', require('./routes/auth.routes'));
+console.log('🔍 Loading admin routes...');
 app.use('/api/admin', require('./routes/admin.routes'));
+console.log('🔍 Admin routes loaded successfully');
 app.use('/api/kyc', require('./routes/kyc.routes'));
 app.use('/api/host', require('./routes/host.routes'));
 app.use('/api/listings', require('./routes/listing.routes'));

@@ -168,7 +168,10 @@ const getListings = async (req, res) => {
       sortOrder = 'desc'
     } = req.query;
 
-    const query = { status: 'published' };
+    const query = { 
+      status: 'published',
+      approvalStatus: 'approved'
+    };
 
     // Search by title or description
     if (search) {
@@ -715,6 +718,7 @@ const getFeaturedListings = async (req, res) => {
 
     const listings = await Property.find({
       status: 'published',
+      approvalStatus: 'approved',
       isFeatured: true
     })
       .populate('host', 'name profileImage')
@@ -756,6 +760,7 @@ const getSimilarListings = async (req, res) => {
     const similarListings = await Property.find({
       _id: { $ne: id },
       status: 'published',
+      approvalStatus: 'approved',
       type: listing.type,
       'location.city': listing.location.city
     })

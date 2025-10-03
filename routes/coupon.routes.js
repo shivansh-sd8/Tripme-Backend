@@ -14,7 +14,7 @@ router.use(auth);
 
 // Coupon CRUD operations
 router.post('/', AuthorizationMiddleware.isAdmin, validateCoupon, couponController.createCoupon);
-router.get('/', couponController.getAllCoupons);
+router.get('/', couponController.getCoupons);
 router.get('/my-coupons', couponController.getMyCoupons);
 router.get('/:id', couponController.getCouponById);
 router.put('/:id', AuthorizationMiddleware.isAdmin, validateCouponUpdate, couponController.updateCoupon);

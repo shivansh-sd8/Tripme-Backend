@@ -64,3 +64,7 @@ print_status "Starting production server..."
 NODE_ENV=production node server.js
 
 print_status "✅ Deployment completed successfully!"
+
+
+
+

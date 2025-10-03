@@ -33,6 +33,8 @@ const auth = async (req, res, next) => {
         });
       }
 
+      console.log('🔍 Admin object from DB:', admin);
+      console.log('🔍 Admin role:', admin.role);
       req.user = admin;
       req.isAdmin = true;
     } else {
