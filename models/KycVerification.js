@@ -9,7 +9,7 @@ const kycVerificationSchema = new mongoose.Schema({
   identityDocument: {
     type: {
       type: String,
-      enum: ['passport', 'national-id', 'drivers-license', 'aadhar-card'],
+      enum: ['aadhar-card', 'pan-card', 'voter-id', 'passport', 'drivers-license'],
       required: true
     },
     number: {
@@ -31,7 +31,7 @@ const kycVerificationSchema = new mongoose.Schema({
   addressProof: {
     type: {
       type: String,
-      enum: ['utility-bill', 'bank-statement', 'rental-agreement', 'property-tax'],
+      enum: ['utility-bill', 'bank-statement', 'rental-agreement', 'property-tax', 'aadhar-address', 'voter-id-address'],
       required: true
     },
     documentImage: {

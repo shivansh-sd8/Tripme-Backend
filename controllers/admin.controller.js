@@ -781,7 +781,8 @@ const getBookings = async (req, res) => {
     if (search) {
       filter.$or = [
         { receiptId: { $regex: search, $options: 'i' } },
-        { 'property.title': { $regex: search, $options: 'i' } }
+        { 'listing.title': { $regex: search, $options: 'i' } },
+        { 'service.title': { $regex: search, $options: 'i' } }
       ];
     }
     
@@ -789,7 +790,8 @@ const getBookings = async (req, res) => {
     const bookings = await Booking.find(filter)
       .populate('user', 'name email phone')
       .populate('host', 'name email phone')
-      .populate('property', 'title address images')
+      .populate('listing', 'title address images')
+      .populate('service', 'title description images')
       .populate('payment', 'amount status paymentMethod')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
@@ -1196,8 +1198,7 @@ const getPayments = async (req, res) => {
     const payments = await Payment.find(filter)
       .populate('user', 'name email phone')
       .populate('host', 'name email phone')
-      .populate('booking', 'receiptId status')
-      .populate('property', 'title address')
+      .populate('booking', 'receiptId status checkIn checkOut totalAmount listing service')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
@@ -1313,7 +1314,8 @@ const getReviews = async (req, res) => {
     const reviews = await Review.find(filter)
       .populate('reviewer', 'name email')
       .populate('reviewedUser', 'name email')
-      .populate('property', 'title address')
+      .populate('listing', 'title address')
+      .populate('service', 'title description')
       .populate('booking', 'receiptId')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
@@ -1594,7 +1596,8 @@ const getAnalytics = async (req, res) => {
       ]),
       Booking.find({ createdAt: { $gte: startDate } })
         .populate('user', 'name email')
-        .populate('property', 'title')
+        .populate('listing', 'title')
+        .populate('service', 'title')
         .sort({ createdAt: -1 })
         .limit(10)
     ]);
@@ -1693,7 +1696,8 @@ const getRecentActivities = async (req, res) => {
     // Recent bookings
     const recentBookings = await Booking.find()
       .populate('user', 'name email')
-      .populate('property', 'title')
+      .populate('listing', 'title')
+      .populate('service', 'title')
       .select('receiptId status totalAmount createdAt')
       .sort({ createdAt: -1 })
       .limit(10);

@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Booking = require('../models/Booking');
 const Review = require('../models/Review');
 const Wishlist = require('../models/Wishlist');
+const Notification = require('../models/Notification');
 const slugify = require('slugify');
 
 // Helper function to transform listing data for frontend
@@ -48,6 +49,7 @@ const createListing = async (req, res) => {
       type,
       propertyType,
       style,
+      placeType,
       pricing,
       amenities,
       features,
@@ -60,6 +62,7 @@ const createListing = async (req, res) => {
       checkInTime,
       checkOutTime,
       cancellationPolicy,
+      hourlyBooking,
       images
     } = req.body;
 
@@ -112,6 +115,7 @@ const createListing = async (req, res) => {
       type,
       propertyType: propertyType || 'standard',
       style: style || 'modern',
+      placeType: placeType || 'entire',
       pricing,
       amenities: amenities || [],
       features: features || [],
@@ -124,6 +128,15 @@ const createListing = async (req, res) => {
       checkInTime: checkInTime || '15:00',
       checkOutTime: checkOutTime || '11:00',
       cancellationPolicy: cancellationPolicy || 'moderate',
+      hourlyBooking: hourlyBooking || {
+        enabled: false,
+        minStayDays: 1,
+        hourlyRates: {
+          sixHours: 0.30,
+          twelveHours: 0.60,
+          eighteenHours: 0.75
+        }
+      },
       images: transformedImages,
       seo: {
         slug
@@ -170,7 +183,8 @@ const getListings = async (req, res) => {
 
     const query = { 
       status: 'published',
-      approvalStatus: 'approved'
+      approvalStatus: 'approved',
+      isPublished: true
     };
 
     // Search by title or description
@@ -212,20 +226,48 @@ const getListings = async (req, res) => {
         }
       };
     }
-    // Filter strictly by city if provided
-    if (location && location.city) {
-      query['location.city'] = location.city;
+    // Enhanced location search - search across all location fields
+    const locationSearchTerm = location?.city || req.query['location.city'] || req.query.city;
+    
+    if (locationSearchTerm) {
+      const searchTerm = locationSearchTerm.trim();
+      console.log('🔍 Location search term:', searchTerm);
+      
+      // Create location search conditions with flexible matching
+      const locationConditions = [
+        { 'location.city': { $regex: searchTerm, $options: 'i' } },
+        { 'location.address': { $regex: searchTerm, $options: 'i' } },
+        { 'location.userAddress': { $regex: searchTerm, $options: 'i' } },
+        { 'location.state': { $regex: searchTerm, $options: 'i' } },
+        { 'location.country': { $regex: searchTerm, $options: 'i' } },
+        { 'location.postalCode': { $regex: searchTerm, $options: 'i' } }
+      ];
+      
+      // Add flexible matching for partial matches and common misspellings
+      if (searchTerm.length >= 3) {
+        // Create flexible regex that allows for character variations
+        const flexibleRegex = searchTerm.split('').join('.*?');
+        locationConditions.push(
+          { 'location.city': { $regex: flexibleRegex, $options: 'i' } },
+          { 'location.address': { $regex: flexibleRegex, $options: 'i' } },
+          { 'location.userAddress': { $regex: flexibleRegex, $options: 'i' } },
+          { 'location.state': { $regex: flexibleRegex, $options: 'i' } }
+        );
+      }
+      
+      // If there's already an $or condition, we need to combine them
+      if (query.$or) {
+        // Combine existing $or with location search
+        query.$and = [
+          { $or: query.$or },
+          { $or: locationConditions }
+        ];
+        delete query.$or;
+      } else {
+        query.$or = locationConditions;
+      }
     }
     
-    // Also check for location.city as a direct query parameter
-    if (req.query['location.city']) {
-      query['location.city'] = req.query['location.city'];
-    }
-    
-    // Support both city and location.city parameters for backward compatibility
-    if (req.query.city) {
-      query['location.city'] = req.query.city;
-    }
 
 
 
@@ -233,6 +275,7 @@ const getListings = async (req, res) => {
     const sort = {};
     sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
 
+    console.log('🔍 Final search query:', JSON.stringify(query, null, 2));
     const listings = await Property.find(query)
       .populate('host', 'name profileImage rating')
       .sort(sort)
@@ -637,15 +680,69 @@ const publishListing = async (req, res) => {
       });
     }
 
-    // Publish the listing
-    listing.status = 'published';
+    // Submit the listing for admin approval
+    listing.status = 'draft'; // Keep as draft until approved
+    listing.approvalStatus = 'pending';
     listing.isDraft = false;
+    listing.isPublished = false; // Not published until host decides
     
     await listing.save();
 
     res.status(200).json({
       success: true,
-      message: 'Listing published successfully',
+      message: 'Listing submitted for approval. It will be published once approved by admin.',
+      data: { listing: transformListingForFrontend(listing) }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error publishing listing',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Publish approved listing (make it available for booking)
+// @route   POST /api/listings/:id/publish-approved
+// @access  Private (Host/Owner only)
+const publishApprovedListing = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const listing = await Property.findById(id);
+
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+
+    // Check if user is the host or admin
+    if (listing.host && listing.host.toString() !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to publish this listing'
+      });
+    }
+
+    // Check if listing is approved
+    if (listing.approvalStatus !== 'approved') {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing must be approved before publishing'
+      });
+    }
+
+    // Publish the listing
+    listing.status = 'published';
+    listing.isPublished = true;
+    
+    await listing.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Listing published successfully and is now available for booking',
       data: { listing: transformListingForFrontend(listing) }
     });
   } catch (error) {
@@ -689,9 +786,10 @@ const unpublishListing = async (req, res) => {
       });
     }
 
-    // Unpublish the listing
+    // Unpublish the listing (but keep approval status)
     listing.status = 'draft';
     listing.isDraft = true;
+    listing.isPublished = false;
     
     await listing.save();
 
@@ -796,7 +894,175 @@ module.exports = {
   getFeaturedListings,
   getSimilarListings,
   publishListing,
+  publishApprovedListing,
   unpublishListing
+};
+
+// @desc    Get pending listings for admin approval
+// @route   GET /api/listings/admin/pending
+// @access  Private (Admin only)
+const getPendingListings = async (req, res) => {
+  try {
+    const { page = 1, limit = 10 } = req.query;
+    
+    const query = {
+      status: 'draft',
+      approvalStatus: 'pending'
+    };
+    
+    const listings = await Property.find(query)
+      .populate('host', 'name email profileImage')
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+    
+    const total = await Property.countDocuments(query);
+    console.log('🔍 Found listings:', listings.length, 'Total:', total);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        listings: listings.map(transformListingForFrontend),
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          totalItems: total,
+          itemsPerPage: limit
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching pending listings',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Approve listing (Admin only)
+// @route   PATCH /api/listings/admin/:id/approve
+// @access  Private (Admin only)
+const approveListing = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNotes } = req.body;
+    
+    const listing = await Property.findById(id);
+    
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+    
+    if (listing.status !== 'draft' || listing.approvalStatus !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing is not pending approval'
+      });
+    }
+    
+    // Approve the listing
+    listing.status = 'draft'; // Keep as draft until host publishes
+    listing.approvalStatus = 'approved';
+    listing.approvedBy = req.user.id;
+    listing.approvedAt = new Date();
+    listing.isPublished = false; // Not published until host decides
+    if (adminNotes) {
+      listing.adminNotes = adminNotes;
+    }
+    
+    await listing.save();
+    
+    // Create notification for host
+    await Notification.create({
+      user: listing.host,
+      type: 'listing_approved',
+      title: 'Listing Approved',
+      message: `Your listing "${listing.title}" has been approved and is now live!`,
+      data: { listingId: listing._id }
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'Listing approved successfully',
+      data: { listing: transformListingForFrontend(listing) }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error approving listing',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Reject listing (Admin only)
+// @route   PATCH /api/listings/admin/:id/reject
+// @access  Private (Admin only)
+const rejectListing = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rejectionReason, adminNotes } = req.body;
+    
+    if (!rejectionReason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required'
+      });
+    }
+    
+    const listing = await Property.findById(id);
+    
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+    
+    if (listing.status !== 'draft' || listing.approvalStatus !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing is not pending approval'
+      });
+    }
+    
+    // Reject the listing
+    listing.status = 'rejected';
+    listing.approvalStatus = 'rejected';
+    listing.rejectedBy = req.user.id;
+    listing.rejectedAt = new Date();
+    listing.rejectionReason = rejectionReason;
+    if (adminNotes) {
+      listing.adminNotes = adminNotes;
+    }
+    
+    await listing.save();
+    
+    // Create notification for host
+    await Notification.create({
+      user: listing.host,
+      type: 'listing_rejected',
+      title: 'Listing Rejected',
+      message: `Your listing "${listing.title}" was rejected. Reason: ${rejectionReason}`,
+      data: { listingId: listing._id, rejectionReason }
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'Listing rejected successfully',
+      data: { listing: transformListingForFrontend(listing) }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error rejecting listing',
+      error: error.message
+    });
+  }
 };
 
 // --- STUBS FOR UNIMPLEMENTED ROUTE HANDLERS ---
@@ -823,9 +1089,6 @@ const stubMethods = [
   'getListingViews',
   'getHostDashboard',
   'getHostPerformance',
-  'getPendingListings',
-  'approveListing',
-  'rejectListing',
   'featureListing'
 ];
 stubMethods.forEach((name) => {
@@ -833,3 +1096,8 @@ stubMethods.forEach((name) => {
     module.exports[name] = notImplemented(name);
   }
 });
+
+// Add the new admin functions to module.exports
+module.exports.getPendingListings = getPendingListings;
+module.exports.approveListing = approveListing;
+module.exports.rejectListing = rejectListing;

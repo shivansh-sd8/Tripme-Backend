@@ -239,14 +239,12 @@ paymentSchema.pre('save', function(next) {
       this.isModified('cleaningFee') || this.isModified('securityDeposit') || 
       this.isModified('processingFee') || this.isModified('discountAmount')) {
     
-    // Calculate total amount correctly
+    // Calculate total amount correctly (subtotal already includes base amount + fees)
+    // Total = subtotal + platform fee + GST + processing fee
     this.amount = this.subtotal + 
+                  (this.commission?.platformFee || 0) + 
                   this.taxes + 
-                  this.serviceFee + 
-                  this.cleaningFee + 
-                  this.securityDeposit + 
-                  this.processingFee + 
-                  (this.commission?.platformFee || 0) - 
+                  this.processingFee - 
                   (this.discountAmount || 0);
     
     // Ensure amount is never negative
@@ -271,12 +269,9 @@ paymentSchema.pre('save', function(next) {
     
     // Recalculate amount with correct platform fee
     this.amount = this.subtotal + 
+                  this.commission.platformFee + 
                   this.taxes + 
-                  this.serviceFee + 
-                  this.cleaningFee + 
-                  this.securityDeposit + 
-                  this.processingFee + 
-                  this.commission.platformFee - 
+                  this.processingFee - 
                   (this.discountAmount || 0);
   }
   

@@ -246,24 +246,29 @@ const getKYCRequirements = async (req, res) => {
     const requirements = {
       identityDocuments: [
         {
+          type: 'aadhar-card',
+          name: 'Aadhar Card',
+          description: 'Indian Aadhar card with photo and QR code'
+        },
+        {
+          type: 'pan-card',
+          name: 'PAN Card',
+          description: 'Indian PAN (Permanent Account Number) card'
+        },
+        {
+          type: 'voter-id',
+          name: 'Voter ID Card',
+          description: 'Indian Voter ID card (EPIC)'
+        },
+        {
           type: 'passport',
           name: 'Passport',
           description: 'Valid passport with clear photo and details'
         },
         {
-          type: 'national-id',
-          name: 'National ID Card',
-          description: 'Government-issued national identification card'
-        },
-        {
           type: 'drivers-license',
           name: 'Driver\'s License',
           description: 'Valid driver\'s license with photo'
-        },
-        {
-          type: 'aadhar-card',
-          name: 'Aadhar Card',
-          description: 'Indian Aadhar card with photo'
         }
       ],
       addressProofs: [
@@ -286,6 +291,16 @@ const getKYCRequirements = async (req, res) => {
           type: 'property-tax',
           name: 'Property Tax Receipt',
           description: 'Property tax receipt or assessment'
+        },
+        {
+          type: 'aadhar-address',
+          name: 'Aadhar Card (Address)',
+          description: 'Aadhar card showing current address'
+        },
+        {
+          type: 'voter-id-address',
+          name: 'Voter ID (Address)',
+          description: 'Voter ID card showing current address'
         }
       ],
       selfie: {

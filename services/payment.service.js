@@ -157,12 +157,33 @@ class PaymentService {
         totalAmount: backendPricing.totalAmount
       };
 
-      // Create payment record
+      // Generate transaction ID and invoice ID
+      const transactionId = paymentData.transactionId || `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const invoiceId = `INV_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const receiptId = `RCP_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      // Create payment record with comprehensive data
       const payment = await Payment.create({
         booking: bookingId,
         user: user._id,
         host: booking.host._id,
-        amount: feeBreakdown.totalAmount,
+        amount: booking.totalAmount, // Use the booking's total amount as the single source of truth
+        currency: booking.currency || 'INR',
+        paymentMethod: paymentData.paymentMethod || 'credit_card',
+        
+        // Payment details with transaction information
+        paymentDetails: {
+          transactionId: transactionId,
+          paymentGateway: paymentData.gateway || 'mock_gateway',
+          gatewayResponse: paymentData.gatewayResponse || {
+            status: 'success',
+            transactionId: transactionId,
+            processedAt: new Date().toISOString(),
+            gateway: paymentData.gateway || 'mock_gateway'
+          }
+        },
+        
+        // Fee breakdown
         subtotal: feeBreakdown.subtotal,
         taxes: feeBreakdown.taxes,
         gst: feeBreakdown.taxes, // GST is the same as taxes
@@ -170,27 +191,53 @@ class PaymentService {
         cleaningFee: feeBreakdown.cleaningFee,
         securityDeposit: feeBreakdown.securityDeposit,
         processingFee: feeBreakdown.processingFee,
-        paymentMethod: paymentData.paymentMethod,
-        paymentDetails: {
-          transactionId: paymentData.transactionId || `TXN_${Date.now()}`,
-          paymentGateway: paymentData.gateway || 'mock',
-          gatewayResponse: paymentData.gatewayResponse
-        },
-        status: 'processing', // Will be updated after verification
+        discountAmount: booking.discountAmount || 0,
+        
+        // Commission structure
         commission: {
           platformFee: feeBreakdown.platformFee,
           hostEarning: feeBreakdown.hostEarning,
           processingFee: feeBreakdown.processingFee
         },
-        currency: booking.currency || 'INR',
-        coupon: booking.couponApplied,
-        discountAmount: booking.discountAmount || 0,
-        // Store complete pricing breakdown for audit
+        
+        // Complete pricing breakdown for audit trail
         pricingBreakdown: backendPricing.breakdown,
+        
+        // Payout tracking initialization
+        payout: {
+          status: 'pending',
+          scheduledDate: booking.bookingType === 'property' && booking.checkIn ? 
+            new Date(new Date(booking.checkIn).getTime() + 24 * 60 * 60 * 1000) : // 24 hours after check-in
+            new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now for services
+          amount: feeBreakdown.hostEarning,
+          method: 'bank_transfer',
+          reference: `PAYOUT_${Date.now()}`,
+          notes: `Payout for booking ${booking.receiptId || booking._id}`
+        },
+        
+        // Invoice and receipt information
+        invoiceId: invoiceId,
+        receiptUrl: `/receipts/${receiptId}`, // TODO: Generate actual receipt URL
+        
+        // Coupon information if applied
+        coupon: booking.couponApplied || null,
+        
+        // Status and processing
+        status: 'processing', // Will be updated after verification
+        
+        // Security and audit metadata
         metadata: {
           ipAddress: paymentData.ipAddress,
           userAgent: paymentData.userAgent,
-          source: paymentData.source || 'web'
+          source: paymentData.source || 'web',
+          idempotencyKey: paymentData.idempotencyKey,
+          sessionId: paymentData.sessionId,
+          requestId: paymentData.requestId,
+          bookingType: booking.bookingType,
+          propertyId: booking.listing,
+          serviceId: booking.service,
+          timestamp: new Date().toISOString(),
+          securityVersion: '1.0'
         }
       });
 

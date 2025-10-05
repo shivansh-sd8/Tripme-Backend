@@ -57,7 +57,7 @@ const userSchema = new mongoose.Schema({
       type: String,
       validate: {
         validator: function(v) {
-          return !v || ['passport', 'national-id', 'drivers-license', 'aadhar-card'].includes(v);
+          return !v || ['aadhar-card', 'pan-card', 'voter-id', 'passport', 'drivers-license'].includes(v);
         },
         message: 'Invalid identity document type'
       }

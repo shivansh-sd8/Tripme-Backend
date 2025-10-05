@@ -318,6 +318,11 @@ const processPaymentAndCreateBooking = async (req, res) => {
     
     const mappedPaymentMethod = paymentMethodMap[paymentMethod] || 'credit_card';
     
+    // Generate transaction ID and invoice ID
+    const transactionId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const invoiceId = `INV_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const receiptId = `RCP_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
     const payment = new Payment({
       booking: booking._id,
       user: req.user._id,
@@ -325,6 +330,20 @@ const processPaymentAndCreateBooking = async (req, res) => {
       amount: totalAmount,
       currency: currency,
       paymentMethod: mappedPaymentMethod,
+      
+      // Payment details with transaction information
+      paymentDetails: {
+        transactionId: transactionId,
+        paymentGateway: 'mock_gateway', // TODO: Replace with actual gateway
+        gatewayResponse: {
+          status: 'success',
+          transactionId: transactionId,
+          processedAt: new Date().toISOString(),
+          gateway: 'mock_gateway'
+        }
+      },
+      
+      // Fee breakdown
       subtotal: subtotal,
       taxes: gst,
       gst: gst,
@@ -332,18 +351,41 @@ const processPaymentAndCreateBooking = async (req, res) => {
       serviceFee: pricing.serviceFee,
       cleaningFee: pricing.cleaningFee,
       securityDeposit: pricing.securityDeposit,
-      status: 'processing',
-      ipAddress: req.ip,
-      userAgent: req.get('User-Agent'),
-      // Store complete pricing breakdown
-      pricingBreakdown: breakdown,
-      // Store commission structure
+      discountAmount: pricing.discountAmount || 0,
+      
+      // Commission structure
       commission: {
         platformFee: platformFee,
         hostEarning: hostEarning,
         processingFee: processingFee
       },
-      // Security metadata
+      
+      // Complete pricing breakdown for audit trail
+      pricingBreakdown: breakdown,
+      
+      // Payout tracking initialization
+      payout: {
+        status: 'pending',
+        scheduledDate: bookingType === 'property' ? 
+          new Date(new Date(checkIn).getTime() + 24 * 60 * 60 * 1000) : // 24 hours after check-in
+          new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now for services
+        amount: hostEarning,
+        method: 'bank_transfer',
+        reference: `PAYOUT_${Date.now()}`,
+        notes: `Payout for booking ${booking.receiptId}`
+      },
+      
+      // Invoice and receipt information
+      invoiceId: invoiceId,
+      receiptUrl: `/receipts/${receiptId}`, // TODO: Generate actual receipt URL
+      
+      // Coupon information if applied
+      coupon: couponApplied || null,
+      
+      // Status and processing
+      status: 'processing',
+      
+      // Security and audit metadata
       metadata: {
         idempotencyKey: finalIdempotencyKey,
         userAgent: req.get('User-Agent'),
@@ -354,7 +396,11 @@ const processPaymentAndCreateBooking = async (req, res) => {
         origin: req.get('Origin'),
         timestamp: new Date().toISOString(),
         securityVersion: '1.0',
-        sessionId: require('crypto').randomUUID()
+        sessionId: require('crypto').randomUUID(),
+        source: 'web',
+        bookingType: bookingType,
+        propertyId: actualListingId,
+        serviceId: serviceId
       }
     });
 

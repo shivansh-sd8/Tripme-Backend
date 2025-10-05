@@ -58,6 +58,11 @@ const propertySchema = new mongoose.Schema({
     enum: ['modern', 'traditional', 'minimalist', 'rustic', 'industrial', 'scandinavian', 'mediterranean', 'tropical'],
     default: 'modern'
   },
+  placeType: {
+    type: String,
+    enum: ['entire', 'room', 'shared'],
+    default: 'entire'
+  },
   images: [{
     url: {
       type: String,
@@ -250,7 +255,11 @@ const propertySchema = new mongoose.Schema({
   approvalStatus: {
     type: String,
     enum: ['pending', 'approved', 'rejected'],
-    default: 'pending'
+    default: null
+  },
+  isPublished: {
+    type: Boolean,
+    default: false
   },
   approvedBy: {
     type: mongoose.Schema.Types.ObjectId,

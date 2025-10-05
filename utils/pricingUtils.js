@@ -59,29 +59,32 @@ async function calculatePricingBreakdown(params) {
     baseAmount += extraGuestPrice * extraGuests * nights;
   }
   
-  // Add host-set fees
-  const hostFees = cleaningFee + serviceFee + securityDeposit;
+  // Add host-set fees (excluding security deposit - it's held separately)
+  const hostFees = cleaningFee + serviceFee;
   
   // Add hourly extension
   const extensionCost = hourlyExtension || 0;
   
-  // Calculate subtotal (before platform fee and taxes)
-  const subtotal = baseAmount + hostFees + extensionCost - discountAmount;
+  // Calculate subtotal for host earning (excluding security deposit)
+  const hostSubtotal = baseAmount + hostFees + extensionCost - discountAmount;
   
-  // Calculate TripMe service fee (dynamic rate of subtotal)
-  const platformFee = toTwoDecimals(subtotal * platformFeeRate);
+  // Calculate total subtotal (including security deposit for customer payment)
+  const totalSubtotal = hostSubtotal + securityDeposit;
   
-  // Calculate GST (18% of subtotal)
-  const gst = toTwoDecimals(subtotal * 0.18);
+  // Calculate TripMe service fee (on host subtotal only, not security deposit)
+  const platformFee = toTwoDecimals(hostSubtotal * platformFeeRate);
   
-  // Calculate processing fee (2.9% + ₹30 fixed)
-  const processingFee = toTwoDecimals(subtotal * 0.029 + 30);
+  // Calculate GST (18% of total subtotal including security deposit)
+  const gst = toTwoDecimals(totalSubtotal * 0.18);
+  
+  // Calculate processing fee (2.9% + ₹30 fixed on total subtotal)
+  const processingFee = toTwoDecimals(totalSubtotal * 0.029 + 30);
   
   // Calculate total amount (what customer pays)
-  const totalAmount = toTwoDecimals(subtotal + platformFee + gst + processingFee);
+  const totalAmount = toTwoDecimals(totalSubtotal + platformFee + gst + processingFee);
   
-  // Calculate host earning (subtotal minus TripMe service fee)
-  const hostEarning = toTwoDecimals(subtotal - platformFee);
+  // Calculate host earning (host subtotal minus TripMe service fee - security deposit is held separately)
+  const hostEarning = toTwoDecimals(hostSubtotal - platformFee);
   
   // Calculate platform revenue (TripMe service fee + processing fee)
   const platformRevenue = toTwoDecimals(platformFee + processingFee);
@@ -104,7 +107,8 @@ async function calculatePricingBreakdown(params) {
     discountAmount: toTwoDecimals(discountAmount),
     
     // Subtotal (before platform fee and taxes)
-    subtotal: toTwoDecimals(subtotal),
+    subtotal: toTwoDecimals(totalSubtotal),
+    hostSubtotal: toTwoDecimals(hostSubtotal),
     
     // TripMe service fees
     platformFee: toTwoDecimals(platformFee),
@@ -134,7 +138,7 @@ async function calculatePricingBreakdown(params) {
         securityDeposit: toTwoDecimals(securityDeposit),
         hourlyExtension: toTwoDecimals(extensionCost),
         discountAmount: toTwoDecimals(discountAmount),
-        subtotal: toTwoDecimals(subtotal),
+        subtotal: toTwoDecimals(totalSubtotal),
         platformFee: toTwoDecimals(platformFee),
         gst: toTwoDecimals(gst),
         processingFee: toTwoDecimals(processingFee),
@@ -149,7 +153,7 @@ async function calculatePricingBreakdown(params) {
         securityDeposit: toTwoDecimals(securityDeposit),
         hourlyExtension: toTwoDecimals(extensionCost),
         discountAmount: toTwoDecimals(discountAmount),
-        subtotal: toTwoDecimals(subtotal),
+        subtotal: toTwoDecimals(hostSubtotal),
         platformFee: toTwoDecimals(platformFee),
         hostEarning: toTwoDecimals(hostEarning)
       },

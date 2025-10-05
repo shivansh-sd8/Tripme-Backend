@@ -51,6 +51,7 @@ router.put('/:id/pricing', AuthorizationMiddleware.isPropertyHost, listingContro
 router.patch('/:id/status', AuthorizationMiddleware.isPropertyHost, listingController.updateListingStatus);
 router.patch('/:id/visibility', AuthorizationMiddleware.isPropertyHost, listingController.updateListingVisibility);
 router.post('/:id/publish', AuthorizationMiddleware.isPropertyHost, listingController.publishListing);
+router.post('/:id/publish-approved', AuthorizationMiddleware.isPropertyHost, listingController.publishApprovedListing);
 router.post('/:id/unpublish', AuthorizationMiddleware.isPropertyHost, listingController.unpublishListing);
 
 // Wishlist integration

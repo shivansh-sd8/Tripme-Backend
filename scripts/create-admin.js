@@ -19,7 +19,7 @@ const createAdmin = async () => {
     const admin = await Admin.create({
       name: 'TripMe Admin',
       email: 'admin@tripme.com',
-      password: 'admin123456',
+      password: 'Admin123456!@#',
       role: 'super-admin',
       permissions: [
         {
