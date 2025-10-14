@@ -8,6 +8,7 @@ const AuthorizationMiddleware = require('../middlewares/authorization.middleware
 // Public routes (with optional authentication)
 router.get('/', listingController.getListings);
 router.get('/search', listingController.searchListings);
+router.get('/map', listingController.getMapProperties); // Dedicated map viewport search
 router.get('/featured', listingController.getFeaturedListings);
 router.get('/categories', listingController.getListingCategories);
 router.get('/locations', listingController.getPopularLocations);

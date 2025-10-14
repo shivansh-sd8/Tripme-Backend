@@ -214,8 +214,56 @@ const getListings = async (req, res) => {
       query.amenities = { $all: amenities.split(',') };
     }
 
-    // Filter by location (nearby search)
-    if (location && location.coordinates) {
+    // 🗺️ GOOGLE MAPS GEOSPATIAL SEARCH - Priority System
+    // Parse Google Maps coordinates from query params
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const coordinates = req.query.coordinates?.split(',').map(Number);
+    const radius = req.query.radius ? Number(req.query.radius) : 20000; // Default 20km
+    const bounds = req.query.bounds?.split(',').map(Number);
+
+    console.log('🗺️ Google Maps search params:', { lng, lat, coordinates, radius, bounds });
+
+    // Priority 1: Bounding box search (for map viewport)
+    if (bounds && bounds.length === 4) {
+      const [swLng, swLat, neLng, neLat] = bounds;
+      console.log('🗺️ Using bounding box search:', { swLng, swLat, neLng, neLat });
+      query.location = {
+        $geoWithin: {
+          $box: [[swLng, swLat], [neLng, neLat]]
+        }
+      };
+    }
+    // Priority 2: Radius search from coordinates (Google Places selected location)
+    else if (coordinates && coordinates.length === 2) {
+      const [searchLng, searchLat] = coordinates;
+      console.log('🗺️ Using radius search from coordinates:', { searchLng, searchLat, radius });
+      query.location = {
+        $near: {
+          $geometry: {
+            type: 'Point',
+            coordinates: [searchLng, searchLat]
+          },
+          $maxDistance: radius
+        }
+      };
+    }
+    // Priority 3: Radius search from lng/lat params
+    else if (lng !== null && lat !== null) {
+      console.log('🗺️ Using radius search from lng/lat:', { lng, lat, radius });
+      query.location = {
+        $near: {
+          $geometry: {
+            type: 'Point',
+            coordinates: [lng, lat]
+          },
+          $maxDistance: radius
+        }
+      };
+    }
+    // Priority 4: Legacy location object with coordinates
+    else if (location && location.coordinates) {
+      console.log('🗺️ Using legacy location object:', location);
       query.location = {
         $near: {
           $geometry: {
@@ -226,64 +274,107 @@ const getListings = async (req, res) => {
         }
       };
     }
-    // Enhanced location search - search across all location fields
-    const locationSearchTerm = location?.city || req.query['location.city'] || req.query.city;
-    
-    if (locationSearchTerm) {
-      const searchTerm = locationSearchTerm.trim();
-      console.log('🔍 Location search term:', searchTerm);
+    // Priority 5: City/text-based search (fallback when no coordinates)
+    else {
+      const locationSearchTerm = location?.city || req.query['location.city'] || req.query.city;
       
-      // Create location search conditions with flexible matching
-      const locationConditions = [
-        { 'location.city': { $regex: searchTerm, $options: 'i' } },
-        { 'location.address': { $regex: searchTerm, $options: 'i' } },
-        { 'location.userAddress': { $regex: searchTerm, $options: 'i' } },
-        { 'location.state': { $regex: searchTerm, $options: 'i' } },
-        { 'location.country': { $regex: searchTerm, $options: 'i' } },
-        { 'location.postalCode': { $regex: searchTerm, $options: 'i' } }
-      ];
-      
-      // Add flexible matching for partial matches and common misspellings
-      if (searchTerm.length >= 3) {
-        // Create flexible regex that allows for character variations
-        const flexibleRegex = searchTerm.split('').join('.*?');
-        locationConditions.push(
-          { 'location.city': { $regex: flexibleRegex, $options: 'i' } },
-          { 'location.address': { $regex: flexibleRegex, $options: 'i' } },
-          { 'location.userAddress': { $regex: flexibleRegex, $options: 'i' } },
-          { 'location.state': { $regex: flexibleRegex, $options: 'i' } }
-        );
-      }
-      
-      // If there's already an $or condition, we need to combine them
-      if (query.$or) {
-        // Combine existing $or with location search
-        query.$and = [
-          { $or: query.$or },
-          { $or: locationConditions }
+      if (locationSearchTerm) {
+        const searchTerm = locationSearchTerm.trim();
+        console.log('🔍 Fallback to city text search:', searchTerm);
+        
+        // Create location search conditions with flexible matching
+        const locationConditions = [
+          { 'location.city': { $regex: searchTerm, $options: 'i' } },
+          { 'location.address': { $regex: searchTerm, $options: 'i' } },
+          { 'location.userAddress': { $regex: searchTerm, $options: 'i' } },
+          { 'location.state': { $regex: searchTerm, $options: 'i' } },
+          { 'location.country': { $regex: searchTerm, $options: 'i' } },
+          { 'location.postalCode': { $regex: searchTerm, $options: 'i' } }
         ];
-        delete query.$or;
-      } else {
-        query.$or = locationConditions;
+        
+        // Add flexible matching for partial matches
+        if (searchTerm.length >= 3) {
+          const flexibleRegex = searchTerm.split('').join('.*?');
+          locationConditions.push(
+            { 'location.city': { $regex: flexibleRegex, $options: 'i' } },
+            { 'location.address': { $regex: flexibleRegex, $options: 'i' } },
+            { 'location.userAddress': { $regex: flexibleRegex, $options: 'i' } },
+            { 'location.state': { $regex: flexibleRegex, $options: 'i' } }
+          );
+        }
+        
+        // Combine with existing $or conditions if any
+        if (query.$or) {
+          query.$and = [
+            { $or: query.$or },
+            { $or: locationConditions }
+          ];
+          delete query.$or;
+        } else {
+          query.$or = locationConditions;
+        }
       }
+    }
+
+    // 🚨 IMPORTANT: Skip city filters when using geospatial search
+    // This ensures we get ALL properties within radius, not just matching city names
+    if (query.location && (query.location.$near || query.location.$geoWithin)) {
+      console.log('🗺️ Using geospatial search - skipping city filters to get ALL properties in area');
+      // Remove any city-based filters that might conflict with geospatial search
+      delete query.$or;
+      delete query.$and;
     }
     
 
 
 
-    // Build sort object
+    // Build sort object (only if NOT using geospatial $near query)
+    const isUsingNearQuery = query.location?.$near !== undefined;
     const sort = {};
-    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    if (!isUsingNearQuery) {
+      sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    }
 
     console.log('🔍 Final search query:', JSON.stringify(query, null, 2));
-    const listings = await Property.find(query)
-      .populate('host', 'name profileImage rating')
-      .sort(sort)
+    console.log('🗺️ Using geospatial $near:', isUsingNearQuery);
+    
+    // Build the query - $near queries cannot use .sort()
+    let queryBuilder = Property.find(query).populate('host', 'name profileImage rating');
+    
+    // Only apply sort if NOT using $near (as $near auto-sorts by distance)
+    if (!isUsingNearQuery && Object.keys(sort).length > 0) {
+      queryBuilder = queryBuilder.sort(sort);
+    }
+    
+    const listings = await queryBuilder
       .limit(limit * 1)
       .skip((page - 1) * limit)
       .exec();
 
-    const total = await Property.countDocuments(query);
+    console.log(`🔍 Found ${listings.length} properties`);
+    if (listings.length > 0) {
+      console.log('📍 First property location:', listings[0].location);
+    }
+
+    // For $near queries, we need to count differently to avoid errors
+    let total;
+    if (isUsingNearQuery) {
+      // Count by running the same query without pagination
+      total = await Property.countDocuments({
+        ...query,
+        // Remove the $near for counting and use $geoWithin with a large radius instead
+        location: {
+          $geoWithin: {
+            $centerSphere: [
+              query.location.$near.$geometry.coordinates,
+              query.location.$near.$maxDistance / 6378100 // Convert meters to radians (Earth radius in meters)
+            ]
+          }
+        }
+      });
+    } else {
+      total = await Property.countDocuments(query);
+    }
 
     // Transform listings for frontend
     const transformedListings = listings.map(transformListingForFrontend);
@@ -1097,7 +1188,87 @@ stubMethods.forEach((name) => {
   }
 });
 
+// @desc    Get properties for map viewport (geospatial only, no text filters)
+// @route   GET /api/listings/map
+// @access  Public
+const getMapProperties = async (req, res) => {
+  try {
+    const { bounds, guests, checkIn, checkOut } = req.query;
+
+    console.log('🗺️ MAP SEARCH - Bounds:', bounds);
+
+    // Base query - only published and approved properties
+    const query = { 
+      status: 'published',
+      approvalStatus: 'approved',
+      isPublished: true
+    };
+
+    // Guest filter
+    if (guests) {
+      query.maxGuests = { $gte: Number(guests) };
+    }
+
+    // Geospatial query - REQUIRED for map searches
+    if (bounds) {
+      const boundsArray = bounds.split(',').map(Number);
+      if (boundsArray.length === 4) {
+        const [swLng, swLat, neLng, neLat] = boundsArray;
+        console.log('🗺️ Searching properties in viewport:', { swLng, swLat, neLng, neLat });
+        
+        query.location = {
+          $geoWithin: {
+            $box: [[swLng, swLat], [neLng, neLat]]
+          }
+        };
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid bounds format. Expected: swLng,swLat,neLng,neLat'
+        });
+      }
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Bounds parameter is required for map searches'
+      });
+    }
+
+    console.log('🗺️ Final query:', JSON.stringify(query, null, 2));
+
+    // Execute query
+    const properties = await Property.find(query)
+      .populate('host', 'name profileImage')
+      .select('-reviews -__v')
+      .limit(500) // Higher limit for map display
+      .lean();
+
+    console.log('🗺️ Found properties:', properties.length);
+
+    // Transform for frontend
+    const transformedProperties = properties.map(transformListingForFrontend);
+
+    res.json({
+      success: true,
+      data: {
+        listings: transformedProperties,
+        count: transformedProperties.length,
+        searchType: 'map_viewport'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error in map search:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch properties for map',
+      message: error.message
+    });
+  }
+};
+
 // Add the new admin functions to module.exports
 module.exports.getPendingListings = getPendingListings;
 module.exports.approveListing = approveListing;
 module.exports.rejectListing = rejectListing;
+module.exports.getMapProperties = getMapProperties;
