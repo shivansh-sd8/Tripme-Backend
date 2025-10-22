@@ -26,7 +26,7 @@ const bookingSchema = new mongoose.Schema({
   },
   bookingDuration: {
     type: String,
-    enum: ['daily', 'hourly'],
+    enum: ['daily', 'hourly', '24hour'],
     default: 'daily'
   },
   hourlyExtension: {
@@ -54,6 +54,30 @@ const bookingSchema = new mongoose.Schema({
   },
   checkOut: {
     type: Date
+  },
+  // NEW: 24-hour based pricing fields
+  checkInDateTime: {
+    type: Date,
+    required: function() { return this.bookingDuration === '24hour'; }
+  },
+  checkOutDateTime: {
+    type: Date,
+    required: function() { return this.bookingDuration === '24hour'; }
+  },
+  baseHours: {
+    type: Number,
+    default: 24
+  },
+  totalHours: {
+    type: Number,
+    required: function() { return this.bookingDuration === '24hour'; }
+  },
+  hostBufferTime: {
+    type: Number,
+    default: 2 // Hours needed for property preparation
+  },
+  nextAvailableTime: {
+    type: Date // When property becomes available for next booking
   },
   checkInTime: {
     type: String,

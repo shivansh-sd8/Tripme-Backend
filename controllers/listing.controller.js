@@ -33,7 +33,14 @@ const transformListingForFrontend = (listing) => {
       ...(transformed.features || []).slice(0, 2)
     ],
     // Add instant bookable flag
-    instantBookable: false
+    instantBookable: false,
+    // Ensure coordinates are properly accessible for map markers
+    coordinates: transformed.location?.coordinates || transformed.coordinates,
+    // Ensure location object has proper structure
+    location: {
+      ...transformed.location,
+      coordinates: transformed.location?.coordinates || transformed.coordinates
+    }
   };
 };
 
@@ -63,6 +70,7 @@ const createListing = async (req, res) => {
       checkOutTime,
       cancellationPolicy,
       hourlyBooking,
+      enable24HourBooking,
       images
     } = req.body;
 
@@ -137,6 +145,7 @@ const createListing = async (req, res) => {
           eighteenHours: 0.75
         }
       },
+      enable24HourBooking: enable24HourBooking || false,
       images: transformedImages,
       seo: {
         slug

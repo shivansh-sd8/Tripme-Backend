@@ -97,6 +97,15 @@ const validateListing = (req, res, next) => {
           'number.max': 'Base price cannot exceed $10,000',
           'any.required': 'Base price is required'
         }),
+      basePrice24Hour: Joi.number()
+        .min(0)
+        .max(10000)
+        .optional()
+        .allow(null)
+        .messages({
+          'number.min': '24-hour price cannot be negative',
+          'number.max': '24-hour price cannot exceed $10,000'
+        }),
       extraGuestPrice: Joi.number()
         .min(0)
         .max(1000)
@@ -316,21 +325,19 @@ const validateListing = (req, res, next) => {
       }),
     images: Joi.array()
       .items(Joi.object({
-        url: Joi.string().uri().required().messages({
-          'string.uri': 'Image URL must be a valid URI',
-          'any.required': 'Image URL is required'
+        url: Joi.string().uri().optional().allow('').messages({
+          'string.uri': 'Image URL must be a valid URI'
         }),
-        publicId: Joi.string().required().messages({
-          'any.required': 'Image public ID is required'
-        }),
-        isPrimary: Joi.boolean().default(false),
-        caption: Joi.string().optional(),
+        publicId: Joi.string().optional().allow(''),
+        isPrimary: Joi.boolean().optional(),
+        caption: Joi.string().optional().allow(''),
         width: Joi.number().optional(),
         height: Joi.number().optional(),
-        format: Joi.string().optional(),
+        format: Joi.string().optional().allow(''),
         size: Joi.number().optional()
       }))
       .max(20)
+      .optional()
       .messages({
         'array.max': 'Cannot exceed 20 images'
       }),
@@ -422,6 +429,12 @@ const validateListingUpdate = (req, res, next) => {
       .messages({
         'any.only': 'Room type must be entire, private, or shared'
       }),
+    placeType: Joi.string()
+      .valid('entire', 'private', 'shared')
+      .optional()
+      .messages({
+        'any.only': 'Place type must be entire, private, or shared'
+      }),
     maxGuests: Joi.number()
       .min(1)
       .max(20)
@@ -470,6 +483,15 @@ const validateListingUpdate = (req, res, next) => {
         .messages({
           'number.min': 'Base price must be at least $1',
           'number.max': 'Base price cannot exceed $10,000'
+        }),
+      basePrice24Hour: Joi.number()
+        .min(0)
+        .max(10000)
+        .optional()
+        .allow(null)
+        .messages({
+          'number.min': '24-hour price cannot be negative',
+          'number.max': '24-hour price cannot exceed $10,000'
         }),
       extraGuestPrice: Joi.number()
         .min(0)
@@ -619,21 +641,22 @@ const validateListingUpdate = (req, res, next) => {
       .messages({
         'array.max': 'Cannot exceed 20 services'
       }),
-    images: Joi.alternatives().try(
-      Joi.array().items(Joi.string().uri()).max(20),
-      Joi.array().items(Joi.object({
-        url: Joi.string().uri().required(),
-        publicId: Joi.string().optional(),
+    images: Joi.array()
+      .items(Joi.object({
+        url: Joi.string().uri().optional().allow(''),
+        publicId: Joi.string().optional().allow(''),
         isPrimary: Joi.boolean().optional(),
-        caption: Joi.string().optional(),
+        caption: Joi.string().optional().allow(''),
         width: Joi.number().optional(),
         height: Joi.number().optional(),
-        format: Joi.string().optional(),
+        format: Joi.string().optional().allow(''),
         size: Joi.number().optional()
-      })).max(20)
-    ).optional().messages({
-      'array.max': 'Cannot exceed 20 images'
-    }),
+      }))
+      .max(20)
+      .optional()
+      .messages({
+        'array.max': 'Cannot exceed 20 images'
+      }),
     availability: Joi.object({
       instantBookable: Joi.boolean().optional(),
       minStay: Joi.number().min(1).max(365).optional(),
@@ -679,6 +702,48 @@ const validateListingUpdate = (req, res, next) => {
     isDraft: Joi.boolean().optional(),
     isSponsored: Joi.boolean().optional(),
     isTopRated: Joi.boolean().optional(),
+    enable24HourBooking: Joi.boolean().optional(),
+    hourlyBooking: Joi.object({
+      enabled: Joi.boolean()
+        .optional()
+        .messages({
+          'boolean.base': 'Hourly booking enabled must be a boolean'
+        }),
+      minStayDays: Joi.number()
+        .min(1)
+        .max(30)
+        .optional()
+        .messages({
+          'number.min': 'Minimum stay days must be at least 1',
+          'number.max': 'Minimum stay days cannot exceed 30'
+        }),
+      hourlyRates: Joi.object({
+        sixHours: Joi.number()
+          .min(0)
+          .max(1)
+          .optional()
+          .messages({
+            'number.min': '6-hour rate cannot be negative',
+            'number.max': '6-hour rate cannot exceed 100%'
+          }),
+        twelveHours: Joi.number()
+          .min(0)
+          .max(1)
+          .optional()
+          .messages({
+            'number.min': '12-hour rate cannot be negative',
+            'number.max': '12-hour rate cannot exceed 100%'
+          }),
+        eighteenHours: Joi.number()
+          .min(0)
+          .max(1)
+          .optional()
+          .messages({
+            'number.min': '18-hour rate cannot be negative',
+            'number.max': '18-hour rate cannot exceed 100%'
+          })
+      }).optional()
+    }).optional(),
     rating: Joi.object({
       average: Joi.number().min(0).max(5).optional(),
       cleanliness: Joi.number().min(0).max(5).optional(),

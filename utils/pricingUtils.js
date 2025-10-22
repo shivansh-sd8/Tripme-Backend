@@ -30,6 +30,153 @@ async function getCurrentPlatformFeeRate() {
 }
 
 /**
+ * Calculate 24-hour based pricing breakdown
+ * @param {Object} params - Pricing parameters for 24-hour booking
+ * @returns {Promise<Object>} Complete pricing breakdown
+ */
+async function calculate24HourPricing(params) {
+  const {
+    basePrice24Hour,
+    totalHours = 24,
+    extraGuestPrice = 0,
+    extraGuests = 0,
+    cleaningFee = 0,
+    serviceFee = 0,
+    securityDeposit = 0,
+    hourlyExtension = 0,
+    discountAmount = 0,
+    currency = 'INR'
+  } = params;
+
+  // Get current platform fee rate from database
+  const platformFeeRate = await getCurrentPlatformFeeRate();
+
+  // Base calculation for 24 hours
+  let baseAmount = basePrice24Hour;
+  
+  // Add extra hours beyond 24 (using existing extension logic)
+  if (totalHours > 24) {
+    const extraHours = totalHours - 24;
+    const extensionCost = calculateHourlyExtension(basePrice24Hour, extraHours);
+    baseAmount += extensionCost;
+  }
+  
+  // Add extra guest charges
+  if (extraGuests > 0) {
+    baseAmount += extraGuestPrice * extraGuests;
+  }
+  
+  // Add host-set fees (excluding security deposit - it's held separately)
+  const hostFees = cleaningFee + serviceFee;
+  
+  // Add hourly extension
+  const extensionCost = hourlyExtension || 0;
+  
+  // Calculate subtotal for host earning (excluding security deposit)
+  const hostSubtotal = baseAmount + hostFees + extensionCost - discountAmount;
+  
+  // Calculate total subtotal (including security deposit for customer payment)
+  const totalSubtotal = hostSubtotal + securityDeposit;
+  
+  // Calculate TripMe service fee (on host subtotal only, not security deposit)
+  const platformFee = toTwoDecimals(hostSubtotal * platformFeeRate);
+  
+  // Calculate GST (18% of total subtotal including security deposit)
+  const gst = toTwoDecimals(totalSubtotal * 0.18);
+  
+  // Calculate processing fee (2.9% + ₹30 fixed on total subtotal)
+  const processingFee = toTwoDecimals(totalSubtotal * 0.029 + 30);
+  
+  // Calculate total amount (what customer pays)
+  const totalAmount = toTwoDecimals(totalSubtotal + platformFee + gst + processingFee);
+  
+  // Calculate host earning (host subtotal minus TripMe service fee - security deposit is held separately)
+  const hostEarning = toTwoDecimals(hostSubtotal - platformFee);
+  
+  // Calculate platform revenue (TripMe service fee + processing fee)
+  const platformRevenue = toTwoDecimals(platformFee + processingFee);
+
+  return {
+    // Base pricing
+    baseAmount: toTwoDecimals(baseAmount),
+    totalHours,
+    extraGuests,
+    extraGuestCost: toTwoDecimals(extraGuestPrice * extraGuests),
+    
+    // Host-set fees
+    cleaningFee: toTwoDecimals(cleaningFee),
+    serviceFee: toTwoDecimals(serviceFee),
+    securityDeposit: toTwoDecimals(securityDeposit),
+    hostFees: toTwoDecimals(hostFees),
+    
+    // Extensions and discounts
+    hourlyExtension: toTwoDecimals(extensionCost),
+    discountAmount: toTwoDecimals(discountAmount),
+    
+    // Subtotal (before platform fee and taxes)
+    subtotal: toTwoDecimals(totalSubtotal),
+    hostSubtotal: toTwoDecimals(hostSubtotal),
+    
+    // TripMe service fees
+    platformFee: toTwoDecimals(platformFee),
+    processingFee: toTwoDecimals(processingFee),
+    platformRevenue: toTwoDecimals(platformRevenue),
+    
+    // Taxes
+    gst: toTwoDecimals(gst),
+    
+    // Final amounts
+    totalAmount: toTwoDecimals(totalAmount),
+    hostEarning: toTwoDecimals(hostEarning),
+    
+    // Currency
+    currency,
+    
+    // Rate used for calculation
+    platformFeeRate: platformFeeRate,
+    
+    // Breakdown for display
+    breakdown: {
+      // What customer sees
+      customerBreakdown: {
+        baseAmount: toTwoDecimals(baseAmount),
+        cleaningFee: toTwoDecimals(cleaningFee),
+        serviceFee: toTwoDecimals(serviceFee),
+        securityDeposit: toTwoDecimals(securityDeposit),
+        hourlyExtension: toTwoDecimals(extensionCost),
+        discountAmount: toTwoDecimals(discountAmount),
+        subtotal: toTwoDecimals(totalSubtotal),
+        platformFee: toTwoDecimals(platformFee),
+        gst: toTwoDecimals(gst),
+        processingFee: toTwoDecimals(processingFee),
+        totalAmount: toTwoDecimals(totalAmount)
+      },
+      
+      // What host sees
+      hostBreakdown: {
+        baseAmount: toTwoDecimals(baseAmount),
+        cleaningFee: toTwoDecimals(cleaningFee),
+        serviceFee: toTwoDecimals(serviceFee),
+        securityDeposit: toTwoDecimals(securityDeposit),
+        hourlyExtension: toTwoDecimals(extensionCost),
+        discountAmount: toTwoDecimals(discountAmount),
+        subtotal: toTwoDecimals(hostSubtotal),
+        platformFee: toTwoDecimals(platformFee),
+        hostEarning: toTwoDecimals(hostEarning)
+      },
+      
+      // What TripMe sees
+      platformBreakdown: {
+        platformFee: toTwoDecimals(platformFee),
+        processingFee: toTwoDecimals(processingFee),
+        gst: toTwoDecimals(gst),
+        platformRevenue: toTwoDecimals(platformRevenue)
+      }
+    }
+  };
+}
+
+/**
  * Calculate pricing breakdown with dynamic platform fee rate
  * @param {Object} params - Pricing parameters
  * @returns {Promise<Object>} Complete pricing breakdown
@@ -45,8 +192,16 @@ async function calculatePricingBreakdown(params) {
     extraGuests = 0,
     hourlyExtension = 0,
     discountAmount = 0,
-    currency = 'INR'
+    currency = 'INR',
+    bookingType,
+    basePrice24Hour,
+    totalHours
   } = params;
+
+  // Use 24-hour pricing for new system
+  if (bookingType === '24hour' || totalHours) {
+    return await calculate24HourPricing(params);
+  }
 
   // Get current platform fee rate from database
   const platformFeeRate = await getCurrentPlatformFeeRate();
@@ -224,11 +379,84 @@ function validatePricingConsistency(frontendPricing, backendPricing) {
   };
 }
 
+/**
+ * Calculate total hours including extensions
+ * @param {number} baseHours - Base hours (default: 24)
+ * @param {number} extensionHours - Extension hours (6, 12, or 18)
+ * @returns {number} Total hours
+ */
+function calculateTotalHours(baseHours = 24, extensionHours = 0) {
+  return baseHours + extensionHours;
+}
+
+/**
+ * Calculate checkout time based on check-in and total hours
+ * @param {Date} checkInDateTime - Check-in date and time
+ * @param {number} totalHours - Total booking hours
+ * @returns {Date} Checkout date and time
+ */
+function calculateCheckoutTime(checkInDateTime, totalHours) {
+  const checkoutTime = new Date(checkInDateTime);
+  checkoutTime.setHours(checkoutTime.getHours() + totalHours);
+  return checkoutTime;
+}
+
+/**
+ * Calculate next available time (checkout + buffer time)
+ * @param {Date} checkOutDateTime - Checkout date and time
+ * @param {number} bufferHours - Buffer hours for property preparation
+ * @returns {Date} Next available time
+ */
+function calculateNextAvailableTime(checkOutDateTime, bufferHours = 2) {
+  const nextAvailable = new Date(checkOutDateTime);
+  nextAvailable.setHours(nextAvailable.getHours() + bufferHours);
+  return nextAvailable;
+}
+
+/**
+ * Validate 24-hour booking parameters
+ * @param {Object} params - Booking parameters
+ * @returns {Object} Validation result
+ */
+function validate24HourBooking(params) {
+  const errors = [];
+  const { checkInDateTime, totalHours, minHours = 24, maxHours = 168 } = params;
+  
+  if (!checkInDateTime) {
+    errors.push('Check-in date and time is required');
+  } else {
+    const checkIn = new Date(checkInDateTime);
+    const now = new Date();
+    
+    if (checkIn < now) {
+      errors.push('Check-in time cannot be in the past');
+    }
+  }
+  
+  if (totalHours < minHours) {
+    errors.push(`Minimum booking duration is ${minHours} hours`);
+  }
+  
+  if (totalHours > maxHours) {
+    errors.push(`Maximum booking duration is ${maxHours} hours`);
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
+}
+
 module.exports = {
   toTwoDecimals,
   getCurrentPlatformFeeRate,
   calculatePricingBreakdown,
+  calculate24HourPricing,
   calculateHourlyExtension,
+  calculateTotalHours,
+  calculateCheckoutTime,
+  calculateNextAvailableTime,
+  validate24HourBooking,
   validatePricingConsistency
 };
 

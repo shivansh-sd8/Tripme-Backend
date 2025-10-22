@@ -66,35 +66,46 @@ const propertySchema = new mongoose.Schema({
   images: [{
     url: {
       type: String,
-      required: true,
+      required: false,
       validate: {
         validator: function(v) {
-          return /^https?:\/\/.+/.test(v);
+          return !v || /^https?:\/\/.+/.test(v);
         },
         message: 'Image URL must be a valid HTTP/HTTPS URL'
       }
     },
-    publicId: String,
-    isPrimary: Boolean,
+    publicId: {
+      type: String,
+      required: false
+    },
+    isPrimary: {
+      type: Boolean,
+      default: false
+    },
     caption: {
       type: String,
-      maxlength: [200, 'Image caption cannot exceed 200 characters']
+      maxlength: [200, 'Image caption cannot exceed 200 characters'],
+      required: false
     },
     width: {
       type: Number,
-      min: [1, 'Image width must be positive']
+      min: [0, 'Image width cannot be negative'],
+      required: false
     },
     height: {
       type: Number,
-      min: [1, 'Image height must be positive']
+      min: [0, 'Image height cannot be negative'],
+      required: false
     },
     format: {
       type: String,
-      enum: ['jpeg', 'jpg', 'png', 'gif', 'webp']
+      enum: ['jpeg', 'jpg', 'png', 'gif', 'webp'],
+      required: false
     },
     size: {
       type: Number,
-      min: [1, 'Image size must be positive']
+      min: [0, 'Image size cannot be negative'],
+      required: false
     }
   }],
   pricing: {
@@ -102,6 +113,12 @@ const propertySchema = new mongoose.Schema({
       type: Number,
       required: true,
       min: [1, 'Price must be at least 1']
+    },
+    // NEW: 24-hour based pricing
+    basePrice24Hour: {
+      type: Number,
+      min: [0, '24-hour price cannot be negative'],
+      default: 0
     },
     extraGuestPrice: {
       type: Number,
@@ -180,6 +197,34 @@ const propertySchema = new mongoose.Schema({
     type: String,
     default: '11:00'
   },
+    // NEW: 24-hour booking settings
+    enable24HourBooking: {
+      type: Boolean,
+      default: false
+    },
+    // NEW: 24-hour availability settings
+    availabilitySettings: {
+      minBookingHours: {
+        type: Number,
+        default: 24
+      },
+      maxBookingHours: {
+        type: Number,
+        default: 168 // 7 days max
+      },
+      hostBufferTime: {
+        type: Number,
+        default: 2 // Hours for property preparation
+      },
+      allowedCheckInTimes: [{
+        type: String,
+        match: [/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/, 'Invalid time format. Use HH:MM']
+      }],
+      advanceBookingDays: {
+        type: Number,
+        default: 365
+      }
+    },
 
   amenities: [{
     type: String,

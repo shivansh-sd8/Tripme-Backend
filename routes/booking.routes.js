@@ -19,6 +19,17 @@ router.get('/property/:id/hourly-settings',
   bookingController.getHourlySettings
 );
 
+// 24-hour booking availability (public)
+router.post('/check-24hour-availability', 
+  securityMiddleware.auditLog('check_24hour_availability'),
+  bookingController.check24HourAvailability
+);
+
+router.get('/24hour-slots/:propertyId', 
+  securityMiddleware.auditLog('get_24hour_time_slots'),
+  bookingController.get24HourTimeSlots
+);
+
 // Protected routes (require authentication)
 router.use(auth);
 
@@ -41,6 +52,14 @@ router.post('/process-payment',
   securityMiddleware.auditLog('process_payment_and_create_booking'),
   validateBooking, 
   bookingController.processPaymentAndCreateBooking
+);
+
+// 24-hour booking
+router.post('/process-24hour-payment', 
+  bookingRateLimit,
+  securityMiddleware.auditLog('process_24hour_booking'),
+  validateBooking, 
+  bookingController.process24HourBooking
 );
 
 router.post('/', 

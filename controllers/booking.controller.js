@@ -6,6 +6,8 @@ const Payment = require('../models/Payment');
 const Coupon = require('../models/Coupon');
 const Availability = require('../models/Availability');
 const { calculatePricingBreakdown, calculateHourlyExtension, calculateExtendedCheckout, getAdditionalDatesForExtension, PRICING_CONFIG, toTwoDecimals } = require('../config/pricing.config');
+const { calculate24HourPricing, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking } = require('../utils/pricingUtils');
+const AvailabilityService = require('../services/availability.service');
 
 const Notification = require('../models/Notification');
 const RefundService = require('../services/refundService');
@@ -42,7 +44,11 @@ const processPaymentAndCreateBooking = async (req, res) => {
       contactInfo,
       paymentMethod,
       idempotencyKey,
-      paymentData
+      paymentData,
+      // NEW: 24-hour booking parameters
+      checkInDateTime,
+      extensionHours,
+      bookingDuration
     } = req.body;
     
     // Generate idempotency key if not provided
@@ -153,6 +159,9 @@ const processPaymentAndCreateBooking = async (req, res) => {
       }
     }
 
+    // Determine if this is a 24-hour booking
+    const is24HourBooking = bookingDuration === '24hour' || checkInDateTime;
+    
     // Calculate pricing using centralized pricing system
     let pricingParams = {
       basePrice: 0,
@@ -164,22 +173,76 @@ const processPaymentAndCreateBooking = async (req, res) => {
       extraGuests: 0,
       hourlyExtension: 0,
       discountAmount: 0,
-      currency: currency
+      currency: currency,
+      bookingType: is24HourBooking ? '24hour' : 'daily'
     };
 
     if (bookingType === 'property') {
-      pricingParams.basePrice = listing.pricing.basePrice;
-      pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
-      pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
-      pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals(listing.pricing.basePrice * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
-      pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
-      pricingParams.nights = Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24));
-      pricingParams.extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
-      
-      // Add hourly extension cost if applicable
-      if (hourlyExtension && hourlyExtension.hours && listing.hourlyBooking?.enabled) {
-        pricingParams.hourlyExtension = calculateHourlyExtension(listing.pricing.basePrice, hourlyExtension.hours);
-        console.log(`🕐 Hourly extension calculated: ${hourlyExtension.hours} hours = ₹${pricingParams.hourlyExtension}`);
+      if (is24HourBooking) {
+        // 24-hour booking logic
+        const totalHours = calculateTotalHours(24, extensionHours || 0);
+        const checkOutDateTime = calculateCheckoutTime(checkInDateTime, totalHours);
+        
+        // Validate 24-hour booking parameters
+        const validation = validate24HourBooking({
+          checkInDateTime,
+          totalHours,
+          minHours: listing.availabilitySettings?.minBookingHours || 24,
+          maxHours: listing.availabilitySettings?.maxBookingHours || 168
+        });
+
+        if (!validation.isValid) {
+          return res.status(400).json({ 
+            success: false, 
+            message: 'Invalid 24-hour booking parameters',
+            errors: validation.errors
+          });
+        }
+
+        // Check availability for 24-hour booking
+        const isAvailable = await AvailabilityService.isTimeSlotAvailable(
+          actualListingId, 
+          checkInDateTime, 
+          checkOutDateTime
+        );
+        
+        if (!isAvailable) {
+          return res.status(400).json({ 
+            success: false, 
+            message: 'Time slot not available for 24-hour booking' 
+          });
+        }
+
+        // Set 24-hour pricing parameters
+        pricingParams.basePrice24Hour = listing.pricing.basePrice24Hour || listing.pricing.basePrice;
+        pricingParams.totalHours = totalHours;
+        pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
+        pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
+        pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals((listing.pricing.basePrice24Hour || listing.pricing.basePrice) * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
+        pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
+        pricingParams.extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
+        
+        // Add extension cost if applicable
+        if (extensionHours && extensionHours > 0) {
+          const extensionCost = calculateHourlyExtension(listing.pricing.basePrice24Hour || listing.pricing.basePrice, extensionHours);
+          pricingParams.hourlyExtension = extensionCost;
+          console.log(`🕐 24-hour extension calculated: ${extensionHours} hours = ₹${extensionCost}`);
+        }
+      } else {
+        // Regular daily booking logic
+        pricingParams.basePrice = listing.pricing.basePrice;
+        pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
+        pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
+        pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals(listing.pricing.basePrice * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
+        pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
+        pricingParams.nights = Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24));
+        pricingParams.extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
+        
+        // Add hourly extension cost if applicable
+        if (hourlyExtension && hourlyExtension.hours && listing.hourlyBooking?.enabled) {
+          pricingParams.hourlyExtension = calculateHourlyExtension(listing.pricing.basePrice, hourlyExtension.hours);
+          console.log(`🕐 Hourly extension calculated: ${hourlyExtension.hours} hours = ₹${pricingParams.hourlyExtension}`);
+        }
       }
     } else {
       pricingParams.basePrice = service.pricing.basePrice;
@@ -235,11 +298,29 @@ const processPaymentAndCreateBooking = async (req, res) => {
       breakdown
     } = pricing;
 
-    // Handle hourly extension checkout time calculation
+    // Handle checkout time calculation based on booking type
     let finalCheckOut = checkOut;
     let finalCheckOutTime = checkOutTime || (bookingType === 'property' ? (listing.checkOutTime || '10:00') : undefined);
+    let bookingCheckInDateTime = checkIn;
+    let bookingCheckOutDateTime = finalCheckOut;
+    let totalHours = 24;
+    let hostBufferTime = 2;
+    let nextAvailableTime = null;
     
-    if (bookingType === 'property' && hourlyExtension && hourlyExtension.hours) {
+    if (is24HourBooking) {
+      // 24-hour booking checkout calculation
+      bookingCheckInDateTime = checkInDateTime;
+      bookingCheckOutDateTime = calculateCheckoutTime(checkInDateTime, totalHours);
+      finalCheckOut = bookingCheckOutDateTime;
+      
+      // Calculate next available time (checkout + buffer time)
+      hostBufferTime = listing.availabilitySettings?.hostBufferTime || 2;
+      nextAvailableTime = calculateNextAvailableTime(bookingCheckOutDateTime, hostBufferTime);
+      
+      console.log(`🕐 24-hour booking: Check-in ${bookingCheckInDateTime.toISOString()}, Check-out ${bookingCheckOutDateTime.toISOString()}`);
+      console.log(`⏰ Total hours: ${totalHours}, Next available: ${nextAvailableTime.toISOString()}`);
+    } else if (bookingType === 'property' && hourlyExtension && hourlyExtension.hours) {
+      // Regular hourly extension logic
       const extensionInfo = calculateExtendedCheckout(
         checkOut, 
         hourlyExtension.hours, 
@@ -264,9 +345,17 @@ const processPaymentAndCreateBooking = async (req, res) => {
       listing: bookingType === 'property' ? actualListingId : undefined,
       service: bookingType === 'service' ? serviceId : undefined,
       bookingType,
+      bookingDuration: is24HourBooking ? '24hour' : 'daily',
       status: 'pending', // Will be updated to confirmed after payment
       checkIn: bookingType === 'property' ? checkIn : undefined,
       checkOut: bookingType === 'property' ? finalCheckOut : undefined,
+      // NEW: 24-hour booking fields
+      checkInDateTime: is24HourBooking ? bookingCheckInDateTime : undefined,
+      checkOutDateTime: is24HourBooking ? bookingCheckOutDateTime : undefined,
+      baseHours: is24HourBooking ? 24 : undefined,
+      totalHours: is24HourBooking ? totalHours : undefined,
+      hostBufferTime: is24HourBooking ? hostBufferTime : undefined,
+      nextAvailableTime: is24HourBooking ? nextAvailableTime : undefined,
       checkInTime: checkInTime || (bookingType === 'property' ? (listing.checkInTime || '11:00') : undefined),
       checkOutTime: finalCheckOutTime,
       timeSlot: bookingType === 'service' ? timeSlot : undefined,
@@ -280,7 +369,11 @@ const processPaymentAndCreateBooking = async (req, res) => {
       currency,
       cancellationPolicy,
       specialRequests: specialRequests || undefined,
-      hourlyExtension: hourlyExtension || undefined,
+      hourlyExtension: is24HourBooking ? (extensionHours > 0 ? {
+        hours: extensionHours,
+        rate: extensionHours === 6 ? 0.30 : extensionHours === 12 ? 0.60 : 0.75,
+        totalHours: extensionHours
+      } : undefined) : (hourlyExtension || undefined),
       contactInfo: contactInfo || undefined,
       paymentStatus: 'pending', // Will be updated to paid after payment
       refundAmount: 0,
@@ -303,7 +396,10 @@ const processPaymentAndCreateBooking = async (req, res) => {
         referer: req.get('Referer'),
         origin: req.get('Origin'),
         timestamp: new Date().toISOString(),
-        securityVersion: '1.0'
+        securityVersion: '1.0',
+        bookingType: is24HourBooking ? '24hour' : 'daily',
+        totalHours: is24HourBooking ? totalHours : undefined,
+        extensionHours: is24HourBooking ? extensionHours : undefined
       }
     });
 
@@ -418,64 +514,79 @@ const processPaymentAndCreateBooking = async (req, res) => {
     booking.paymentStatus = 'paid'; // Payment is successful but booking needs host approval
     await booking.save();
 
-    // Step 4.5: Block availability for the booking dates (including hourly extensions)
-    if (bookingType === 'property' && actualListingId && checkIn && finalCheckOut) {
+    // Step 4.5: Block availability for the booking dates
+    if (bookingType === 'property' && actualListingId) {
       try {
-        console.log('🔒 Blocking property dates for booking...');
-        
-        // Generate array of dates to block
-        const startDate = new Date(checkIn);
-        const endDate = new Date(finalCheckOut);
-        const datesToBlock = [];
-        
-        let currentDate = new Date(startDate);
-        while (currentDate <= endDate) {
-          const dateStr = currentDate.toISOString().split('T')[0];
-          datesToBlock.push(dateStr);
-          currentDate.setDate(currentDate.getDate() + 1);
-        }
-        
-        // Add additional dates for hourly extensions if they extend to next day
-        if (hourlyExtension && hourlyExtension.hours) {
-          const additionalDates = getAdditionalDatesForExtension(
-            checkOut, 
-            hourlyExtension.hours, 
-            finalCheckOutTime
+        if (is24HourBooking) {
+          // Block time-based availability for 24-hour booking
+          console.log('🔒 Blocking 24-hour time slot for booking...');
+          
+          await AvailabilityService.blockTimeSlot(
+            actualListingId,
+            bookingCheckInDateTime,
+            bookingCheckOutDateTime,
+            booking._id
           );
           
-          additionalDates.forEach(date => {
-            const dateStr = date.toISOString().split('T')[0];
-            if (!datesToBlock.includes(dateStr)) {
-              datesToBlock.push(dateStr);
-            }
-          });
+          console.log(`✅ Successfully blocked 24-hour time slot: ${bookingCheckInDateTime.toISOString()} to ${bookingCheckOutDateTime.toISOString()}`);
+        } else if (checkIn && finalCheckOut) {
+          // Block date-based availability for regular booking
+          console.log('🔒 Blocking property dates for booking...');
+          
+          // Generate array of dates to block
+          const startDate = new Date(checkIn);
+          const endDate = new Date(finalCheckOut);
+          const datesToBlock = [];
+          
+          let currentDate = new Date(startDate);
+          while (currentDate <= endDate) {
+            const dateStr = currentDate.toISOString().split('T')[0];
+            datesToBlock.push(dateStr);
+            currentDate.setDate(currentDate.getDate() + 1);
+          }
+          
+          // Add additional dates for hourly extensions if they extend to next day
+          if (hourlyExtension && hourlyExtension.hours) {
+            const additionalDates = getAdditionalDatesForExtension(
+              checkOut, 
+              hourlyExtension.hours, 
+              finalCheckOutTime
+            );
+            
+            additionalDates.forEach(date => {
+              const dateStr = date.toISOString().split('T')[0];
+              if (!datesToBlock.includes(dateStr)) {
+                datesToBlock.push(dateStr);
+              }
+            });
+          }
+          
+          console.log('📅 Property dates to block:', datesToBlock);
+          
+          // Create or update availability records for each date
+          for (const dateStr of datesToBlock) {
+            await Availability.findOneAndUpdate(
+              {
+                property: actualListingId,
+                date: new Date(dateStr)
+              },
+              {
+                property: actualListingId,
+                date: new Date(dateStr),
+                status: 'blocked',
+                reason: 'Booking in progress',
+                blockedBy: req.user._id,
+                blockedAt: new Date()
+              },
+              { upsert: true, new: true }
+            );
+          }
+          
+          console.log(`✅ Successfully blocked ${datesToBlock.length} property dates for booking`);
         }
-        
-        console.log('📅 Property dates to block:', datesToBlock);
-        
-        // Create or update availability records for each date
-        for (const dateStr of datesToBlock) {
-          await Availability.findOneAndUpdate(
-            {
-              property: actualListingId,
-              date: new Date(dateStr)
-            },
-            {
-              property: actualListingId,
-              date: new Date(dateStr),
-              status: 'blocked',
-              reason: 'Booking in progress',
-              blockedBy: req.user._id,
-              blockedAt: new Date()
-            },
-            { upsert: true, new: true }
-          );
-        }
-        
-        console.log(`✅ Successfully blocked ${datesToBlock.length} property dates for booking`);
         
       } catch (availabilityError) {
-        console.error('⚠️ Error blocking property dates:', availabilityError);
+        console.error('⚠️ Error blocking property availability:', availabilityError);
         // Don't fail the booking if availability blocking fails
         // The booking can still proceed, but dates won't be blocked
       }
@@ -563,11 +674,22 @@ const processPaymentAndCreateBooking = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Booking request created and payment processed successfully',
+      message: is24HourBooking ? '24-hour booking created and payment processed successfully' : 'Booking request created and payment processed successfully',
       data: { 
         booking,
         payment,
-        message: `Booking request submitted! Payment of ₹${totalAmount} processed successfully. The host will review your request and confirm within 24 hours.`
+        // 24-hour booking specific data
+        ...(is24HourBooking && {
+          checkInDateTime: bookingCheckInDateTime,
+          checkOutDateTime: bookingCheckOutDateTime,
+          totalHours: totalHours,
+          extensionHours: extensionHours || 0,
+          nextAvailableTime: nextAvailableTime,
+          hostBufferTime: hostBufferTime
+        }),
+        message: is24HourBooking 
+          ? `24-hour booking confirmed! Payment of ₹${totalAmount} processed successfully. Check-in: ${bookingCheckInDateTime.toLocaleString()}, Check-out: ${bookingCheckOutDateTime.toLocaleString()}.`
+          : `Booking request submitted! Payment of ₹${totalAmount} processed successfully. The host will review your request and confirm within 24 hours.`
       }
     });
 
@@ -3444,6 +3566,347 @@ const markRefundAsCompleted = async (req, res) => {
   }
 };
 
+// @desc    Process 24-hour booking with payment
+// @route   POST /api/bookings/process-24hour-payment
+// @access  Private
+const process24HourBooking = async (req, res) => {
+  try {
+    const {
+      propertyId,
+      checkInDateTime, // Exact check-in time
+      extensionHours = 0, // 6, 12, or 18
+      guests,
+      specialRequests,
+      couponCode,
+      contactInfo,
+      paymentMethod,
+      idempotencyKey,
+      paymentData
+    } = req.body;
+    
+    // Generate idempotency key if not provided
+    const finalIdempotencyKey = idempotencyKey || require('crypto').randomUUID();
+    
+    // Check for duplicate booking with same idempotency key
+    const existingBooking = await Booking.findOne({ 
+      'metadata.idempotencyKey': finalIdempotencyKey,
+      user: req.user._id
+    });
+    
+    if (existingBooking) {
+      return res.status(409).json({ 
+        success: false, 
+        message: 'Booking with this idempotency key already exists',
+        bookingId: existingBooking._id
+      });
+    }
+
+    // Get property details
+    const property = await Property.findById(propertyId);
+    if (!property) {
+      return res.status(404).json({ success: false, message: 'Property not found' });
+    }
+
+    const host = await User.findById(property.host);
+    if (!host) {
+      return res.status(404).json({ success: false, message: 'Host not found' });
+    }
+
+    // Validate minimum 24 hours
+    const totalHours = calculateTotalHours(24, extensionHours);
+    if (totalHours < 24) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Minimum 24 hours booking required' 
+      });
+    }
+
+    // Validate 24-hour booking parameters
+    const validation = validate24HourBooking({
+      checkInDateTime,
+      totalHours,
+      minHours: property.availabilitySettings?.minBookingHours || 24,
+      maxHours: property.availabilitySettings?.maxBookingHours || 168
+    });
+
+    if (!validation.isValid) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid booking parameters',
+        errors: validation.errors
+      });
+    }
+
+    // Calculate checkout time
+    const checkOutDateTime = calculateCheckoutTime(checkInDateTime, totalHours);
+    
+    // Check availability
+    const isAvailable = await AvailabilityService.isTimeSlotAvailable(
+      propertyId, 
+      checkInDateTime, 
+      checkOutDateTime
+    );
+    
+    if (!isAvailable) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Time slot not available' 
+      });
+    }
+
+    // Calculate pricing
+    const pricingParams = {
+      basePrice24Hour: property.pricing.basePrice24Hour || property.pricing.basePrice,
+      totalHours,
+      extraGuestPrice: property.pricing.extraGuestPrice,
+      extraGuests: guests.adults > 1 ? guests.adults - 1 : 0,
+      cleaningFee: property.pricing.cleaningFee,
+      serviceFee: property.pricing.serviceFee,
+      securityDeposit: property.pricing.securityDeposit,
+      currency: property.pricing.currency,
+      bookingType: '24hour'
+    };
+
+    // Apply coupon if provided
+    let couponApplied = null;
+    if (couponCode) {
+      const coupon = await Coupon.findOne({
+        code: couponCode.toUpperCase(),
+        isActive: true,
+        validFrom: { $lte: new Date() },
+        validTo: { $gte: new Date() }
+      });
+      
+      if (coupon) {
+        const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
+        if (!hasUsed) {
+          // Calculate subtotal first to apply coupon discount
+          const tempPricing = await calculate24HourPricing(pricingParams);
+          let discountAmount = 0;
+          
+          if (coupon.discountType === 'percentage') {
+            discountAmount = (tempPricing.subtotal * coupon.amount) / 100;
+            const maxDiscount = coupon.maxDiscount || discountAmount;
+            discountAmount = Math.min(discountAmount, maxDiscount);
+          } else {
+            discountAmount = coupon.amount;
+          }
+          
+          pricingParams.discountAmount = discountAmount;
+          couponApplied = coupon._id;
+          coupon.usedCount += 1;
+          coupon.usedBy.push({ user: req.user._id, usedAt: new Date() });
+          await coupon.save();
+        }
+      }
+    }
+
+    // Calculate final pricing
+    const pricing = await calculate24HourPricing(pricingParams);
+    
+    // Calculate next available time
+    const hostBufferTime = property.availabilitySettings?.hostBufferTime || 2;
+    const nextAvailableTime = calculateNextAvailableTime(checkOutDateTime, hostBufferTime);
+
+    // Create booking
+    const booking = await Booking.create({
+      user: req.user._id,
+      host: host._id,
+      listing: propertyId,
+      bookingType: 'property',
+      bookingDuration: '24hour',
+      checkInDateTime: new Date(checkInDateTime),
+      checkOutDateTime: new Date(checkOutDateTime),
+      checkIn: new Date(checkInDateTime), // For backward compatibility
+      checkOut: new Date(checkOutDateTime), // For backward compatibility
+      baseHours: 24,
+      totalHours,
+      hostBufferTime,
+      nextAvailableTime,
+      guests,
+      totalAmount: pricing.totalAmount,
+      subtotal: pricing.subtotal,
+      taxAmount: pricing.gst,
+      serviceFee: pricing.serviceFee,
+      cleaningFee: pricing.cleaningFee,
+      securityDeposit: pricing.securityDeposit,
+      currency: property.pricing.currency,
+      cancellationPolicy: property.cancellationPolicy || 'moderate',
+      specialRequests: specialRequests || undefined,
+      hourlyExtension: extensionHours > 0 ? {
+        hours: extensionHours,
+        rate: extensionHours === 6 ? 0.30 : extensionHours === 12 ? 0.60 : 0.75,
+        totalHours: extensionHours
+      } : undefined,
+      contactInfo: contactInfo || undefined,
+      paymentStatus: 'pending',
+      refundAmount: 0,
+      refunded: false,
+      couponApplied,
+      discountAmount: pricing.discountAmount,
+      hostFee: pricing.hostEarning,
+      platformFee: pricing.platformFee,
+      processingFee: pricing.processingFee,
+      gst: pricing.gst,
+      pricingBreakdown: pricing.breakdown,
+      metadata: {
+        idempotencyKey: finalIdempotencyKey,
+        userAgent: req.get('User-Agent'),
+        ipAddress: req.ip,
+        bookingType: '24hour',
+        totalHours,
+        extensionHours
+      }
+    });
+
+    // Block availability
+    await AvailabilityService.blockTimeSlot(
+      propertyId, 
+      checkInDateTime, 
+      checkOutDateTime, 
+      booking._id
+    );
+
+    // Send notifications
+    await Notification.create({
+      user: host._id,
+      type: 'new_booking',
+      title: 'New 24-Hour Booking',
+      message: `New 24-hour booking received for ${property.title}`,
+      data: { bookingId: booking._id, propertyId: propertyId }
+    });
+
+    res.status(201).json({
+      success: true,
+      message: '24-hour booking created successfully',
+      data: {
+        booking,
+        pricing,
+        nextAvailableTime,
+        totalHours,
+        extensionHours
+      }
+    });
+  } catch (error) {
+    console.error('Error creating 24-hour booking:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error creating 24-hour booking',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Check 24-hour time slot availability
+// @route   POST /api/bookings/check-24hour-availability
+// @access  Private
+const check24HourAvailability = async (req, res) => {
+  try {
+    const { propertyId, checkInDateTime, extensionHours = 0 } = req.body;
+    
+    const totalHours = calculateTotalHours(24, extensionHours);
+    const checkOutDateTime = calculateCheckoutTime(checkInDateTime, totalHours);
+    
+    const isAvailable = await AvailabilityService.isTimeSlotAvailable(
+      propertyId, 
+      checkInDateTime, 
+      checkOutDateTime
+    );
+    
+    res.json({
+      success: true,
+      available: isAvailable,
+      checkInDateTime,
+      checkOutDateTime,
+      totalHours
+    });
+  } catch (error) {
+    console.error('Error checking 24-hour availability:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error checking availability',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get available 24-hour time slots
+// @route   GET /api/bookings/24hour-slots/:propertyId
+// @access  Private
+const get24HourTimeSlots = async (req, res) => {
+  try {
+    const { propertyId } = req.params;
+    const { startDate, endDate } = req.query;
+    
+    // Get property details
+    const property = await Property.findById(propertyId);
+    if (!property) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+
+    // Parse dates
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    
+    // Generate time slots for the next 30 days if no dates provided
+    const now = new Date();
+    const startDateToUse = startDate ? start : now;
+    const endDateToUse = endDate ? end : new Date(now.getTime() + (30 * 24 * 60 * 60 * 1000)); // 30 days from now
+    
+    // Generate hourly time slots (every hour from 6 AM to 10 PM)
+    const timeSlots = [];
+    const currentDate = new Date(startDateToUse);
+    
+    while (currentDate <= endDateToUse) {
+      // Generate slots for each day from 6 AM to 10 PM
+      for (let hour = 6; hour <= 22; hour++) {
+        const slotStart = new Date(currentDate);
+        slotStart.setHours(hour, 0, 0, 0);
+        
+        const slotEnd = new Date(slotStart);
+        slotEnd.setHours(slotStart.getHours() + 24);
+        
+        // Check if this time slot is available
+        const isAvailable = await AvailabilityService.isTimeSlotAvailable(
+          propertyId,
+          slotStart,
+          slotEnd
+        );
+        
+        timeSlots.push({
+          startDateTime: slotStart.toISOString(),
+          endDateTime: slotEnd.toISOString(),
+          duration: 24,
+          isAvailable: isAvailable
+        });
+      }
+      
+      // Move to next day
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+    
+    // Filter to only show available slots
+    const availableSlots = timeSlots.filter(slot => slot.isAvailable);
+    
+    res.json({
+      success: true,
+      timeSlots: availableSlots,
+      totalSlots: timeSlots.length,
+      availableSlots: availableSlots.length
+    });
+  } catch (error) {
+    console.error('Error getting 24-hour time slots:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error getting time slots',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   // Guest functions
   processPaymentAndCreateBooking,
@@ -3490,6 +3953,11 @@ module.exports = {
   rejectRefund,
   markRefundAsProcessing,
   markRefundAsCompleted,
+  
+  // 24-hour booking functions
+  process24HourBooking,
+  check24HourAvailability,
+  get24HourTimeSlots,
   
   // Legacy aliases for backward compatibility
   getBooking,
