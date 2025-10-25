@@ -5,8 +5,7 @@ const User = require('../models/User');
 const Payment = require('../models/Payment');
 const Coupon = require('../models/Coupon');
 const Availability = require('../models/Availability');
-const { calculatePricingBreakdown, calculateHourlyExtension, calculateExtendedCheckout, getAdditionalDatesForExtension, PRICING_CONFIG, toTwoDecimals } = require('../config/pricing.config');
-const { calculate24HourPricing, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking } = require('../utils/pricingUtils');
+const { calculateUnifiedPricing, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking, calculateHourlyExtension, toTwoDecimals } = require('../utils/unifiedPricing');
 const AvailabilityService = require('../services/availability.service');
 
 const Notification = require('../models/Notification');
@@ -22,6 +21,7 @@ const {
   sendHostStatusUpdateEmail
 } = require('../utils/sendEmail');
 const { generateReceipt, generateReceiptHTML } = require('../utils/generateReceipt');
+const { PRICING_CONFIG } = require('../config/pricing.config');
 
 // @desc    Process payment and create booking (new flow)
 // @route   POST /api/bookings/process-payment
@@ -218,7 +218,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
         pricingParams.totalHours = totalHours;
         pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
         pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
-        pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals((listing.pricing.basePrice24Hour || listing.pricing.basePrice) * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
+        pricingParams.serviceFee = listing.pricing.serviceFee || 0; // Use property's service fee or 0
         pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
         pricingParams.extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
         
@@ -233,9 +233,20 @@ const processPaymentAndCreateBooking = async (req, res) => {
         pricingParams.basePrice = listing.pricing.basePrice;
         pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
         pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
-        pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals(listing.pricing.basePrice * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
+        pricingParams.serviceFee = listing.pricing.serviceFee || 0; // Use property's service fee or 0
         pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
-        pricingParams.nights = Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24));
+        // Calculate nights properly for accommodation bookings
+        // Count actual nights stayed (Nov 1 to Nov 5 = 4 nights)
+        const checkInDate = new Date(checkIn);
+        const checkOutDate = new Date(checkOut);
+        
+        // Strip time components to get date-only comparison
+        const checkInDateOnly = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+        const checkOutDateOnly = new Date(checkOutDate.getFullYear(), checkOutDate.getMonth(), checkOutDate.getDate());
+        
+        const diffTime = checkOutDateOnly - checkInDateOnly;
+        const diffDays = diffTime / (1000 * 60 * 60 * 24);
+        pricingParams.nights = Math.max(0, diffDays);
         pricingParams.extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
         
         // Add hourly extension cost if applicable
@@ -264,7 +275,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
         const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
         if (!hasUsed) {
           // Calculate subtotal first to apply coupon discount
-          const tempPricing = await calculatePricingBreakdown(pricingParams);
+          const tempPricing = await calculateUnifiedPricing(pricingParams);
           let discountAmount = 0;
           
           if (coupon.discountType === 'percentage') {
@@ -284,8 +295,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
       }
     }
 
-    // Calculate final pricing breakdown
-    const pricing = await calculatePricingBreakdown(pricingParams);
+    // Calculate final pricing breakdown using UNIFIED SYSTEM (BACKEND ONLY)
+    const pricing = await calculateUnifiedPricing(pricingParams);
     
     // Extract values for backward compatibility
     const {
@@ -821,9 +832,20 @@ const createBooking = async (req, res) => {
       pricingParams.basePrice = listing.pricing.basePrice;
       pricingParams.extraGuestPrice = listing.pricing.extraGuestPrice || 0;
       pricingParams.cleaningFee = listing.pricing.cleaningFee || 0;
-      pricingParams.serviceFee = listing.pricing.serviceFee || toTwoDecimals(listing.pricing.basePrice * PRICING_CONFIG.DEFAULT_SERVICE_FEE_RATE);
+      pricingParams.serviceFee = listing.pricing.serviceFee || 0; // Use property's service fee or 0
       pricingParams.securityDeposit = listing.pricing.securityDeposit || 0;
-      pricingParams.nights = Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24));
+      // Calculate nights properly for accommodation bookings
+      // Count actual nights stayed (Nov 1 to Nov 5 = 4 nights)
+      const checkInDate = new Date(checkIn);
+      const checkOutDate = new Date(checkOut);
+      
+      // Strip time components to get date-only comparison
+      const checkInDateOnly = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+      const checkOutDateOnly = new Date(checkOutDate.getFullYear(), checkOutDate.getMonth(), checkOutDate.getDate());
+      
+      const diffTime = checkOutDateOnly - checkInDateOnly;
+      const diffDays = diffTime / (1000 * 60 * 60 * 24);
+      pricingParams.nights = Math.max(0, diffDays);
       pricingParams.extraGuests = guestDetails.adults > 1 ? guestDetails.adults - 1 : 0;
       
       // Add hourly extension cost if applicable
@@ -852,7 +874,7 @@ const createBooking = async (req, res) => {
         const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
         if (!hasUsed) {
           // Calculate subtotal first to apply coupon discount
-          const tempPricing = await calculatePricingBreakdown(pricingParams);
+          const tempPricing = await calculateUnifiedPricing(pricingParams);
           let discountAmount = 0;
           
           if (coupon.discountType === 'percentage') {
@@ -876,8 +898,8 @@ const createBooking = async (req, res) => {
       }
     }
 
-    // Calculate final pricing breakdown
-    const pricing = await calculatePricingBreakdown(pricingParams);
+    // Calculate final pricing breakdown using UNIFIED SYSTEM (BACKEND ONLY)
+    const pricing = await calculateUnifiedPricing(pricingParams);
     
     // Extract values for backward compatibility
     const {
@@ -3168,7 +3190,15 @@ const calculateHourlyPrice = async (req, res) => {
     // Calculate pricing using centralized system
     const pricingParams = {
       basePrice: property.pricing.basePrice,
-      nights: Math.ceil((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)),
+      nights: (() => {
+        const checkInDate = new Date(checkIn);
+        const checkOutDate = new Date(checkOut);
+        const checkInDateOnly = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+        const checkOutDateOnly = new Date(checkOutDate.getFullYear(), checkOutDate.getMonth(), checkOutDate.getDate());
+        const diffTime = checkOutDateOnly - checkInDateOnly;
+        const diffDays = diffTime / (1000 * 60 * 60 * 24);
+        return Math.max(0, diffDays);
+      })(),
       extraGuestPrice: property.pricing.extraGuestPrice || 0,
       extraGuests: guests && guests.adults > 1 ? guests.adults - 1 : 0,
       cleaningFee: property.pricing.cleaningFee || 0,
@@ -3187,8 +3217,8 @@ const calculateHourlyPrice = async (req, res) => {
       });
     }
 
-    // Calculate final pricing breakdown
-    const pricing = await calculatePricingBreakdown(pricingParams);
+    // Calculate final pricing breakdown using UNIFIED SYSTEM (BACKEND ONLY)
+    const pricing = await calculateUnifiedPricing(pricingParams);
 
     // Create hourly-specific breakdown for display
     const hourlyBreakdown = hourlyExtension ? {

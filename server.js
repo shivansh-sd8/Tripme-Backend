@@ -153,6 +153,8 @@ app.use('/api/coupons', require('./routes/coupon.routes'));
 app.use('/api/support', require('./routes/support.routes'));
 app.use('/api/upload', require('./routes/upload.routes'));
 app.use('/api/availability', require('./routes/availability.routes'));
+app.use('/api/pricing', require('./routes/pricing.routes'));
+app.use('/api/secure-pricing', require('./routes/securePricing.routes'));
 // Hourly booking routes moved to main booking routes
 
 // Health check route

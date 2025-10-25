@@ -5,7 +5,7 @@ const Booking = require('../models/Booking');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const PaymentAuditLog = require('../models/PaymentAuditLog');
-const { calculatePricingBreakdown, validatePricingConsistency, toTwoDecimals } = require('../utils/pricingUtils');
+const { calculateUnifiedPricing, validatePricingConsistency } = require('../utils/unifiedPricing');
 
 class PaymentService {
   /**
@@ -92,8 +92,8 @@ class PaymentService {
         currency: booking.currency || 'INR'
       };
 
-      // Recalculate pricing using current platform fee rate
-      const backendPricing = await calculatePricingBreakdown(pricingParams);
+      // Recalculate pricing using UNIFIED SYSTEM (BACKEND ONLY)
+      const backendPricing = await calculateUnifiedPricing(pricingParams);
       
       // Get frontend pricing from payment data for comparison
       const frontendPricing = paymentData.pricingBreakdown || {
