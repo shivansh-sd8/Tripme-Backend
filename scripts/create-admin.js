@@ -16,10 +16,11 @@ const createAdmin = async () => {
     }
 
     // Create admin user
+    const adminPassword = process.env.ADMIN_PASSWORD || 'TempPassword123!@#';
     const admin = await Admin.create({
       name: 'TripMe Admin',
       email: 'admin@tripme.com',
-      password: 'Admin123456!@#',
+      password: adminPassword,
       role: 'super-admin',
       permissions: [
         {

@@ -424,16 +424,16 @@ const validateListingUpdate = (req, res, next) => {
         'any.only': 'Style must be one of the valid options'
       }),
     roomType: Joi.string()
-      .valid('entire', 'private', 'shared')
+      .valid('entire', 'room', 'shared')
       .optional()
       .messages({
-        'any.only': 'Room type must be entire, private, or shared'
+        'any.only': 'Room type must be entire, room, or shared'
       }),
     placeType: Joi.string()
-      .valid('entire', 'private', 'shared')
+      .valid('entire', 'room', 'shared')
       .optional()
       .messages({
-        'any.only': 'Place type must be entire, private, or shared'
+        'any.only': 'Place type must be entire, room, or shared'
       }),
     maxGuests: Joi.number()
       .min(1)

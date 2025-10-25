@@ -511,6 +511,15 @@ const updateListing = async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
+    
+    console.log('Update listing request:', {
+      id,
+      updateData,
+      placeType: updateData.placeType,
+      hasImages: !!updateData.images,
+      imagesCount: updateData.images?.length || 0,
+      images: updateData.images
+    });
 
     const listing = await Property.findById(id);
 
@@ -530,7 +539,7 @@ const updateListing = async (req, res) => {
     }
 
     // Transform images if they are strings to objects
-    if (updateData.images && Array.isArray(updateData.images)) {
+    if (updateData.images && Array.isArray(updateData.images) && updateData.images.length > 0) {
       updateData.images = updateData.images.map((image, index) => {
         if (typeof image === 'string') {
           // If image is a string (URL), convert to object format
@@ -547,7 +556,18 @@ const updateListing = async (req, res) => {
         }
         return image; // If already an object, keep as is
       });
+    } else if (updateData.images && Array.isArray(updateData.images) && updateData.images.length === 0) {
+      // If empty array is sent, remove it from updateData to avoid overwriting existing images
+      console.log('Empty images array received, removing from update data to preserve existing images');
+      delete updateData.images;
     }
+    
+    console.log('Processed update data:', {
+      hasImages: !!updateData.images,
+      imagesCount: updateData.images?.length || 0,
+      images: updateData.images,
+      allFields: Object.keys(updateData)
+    });
 
     // Generate new slug if title is updated
     if (updateData.title && updateData.title !== listing.title) {
@@ -562,6 +582,12 @@ const updateListing = async (req, res) => {
       updateData,
       { new: true, runValidators: true }
     ).populate('host', 'name profileImage');
+
+    console.log('Updated listing:', {
+      id: updatedListing._id,
+      placeType: updatedListing.placeType,
+      originalPlaceType: listing.placeType
+    });
 
     res.status(200).json({
       success: true,
