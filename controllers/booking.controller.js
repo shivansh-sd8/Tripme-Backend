@@ -5,7 +5,8 @@ const User = require('../models/User');
 const Payment = require('../models/Payment');
 const Coupon = require('../models/Coupon');
 const Availability = require('../models/Availability');
-const { calculateUnifiedPricing, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking, calculateHourlyExtension, toTwoDecimals } = require('../utils/unifiedPricing');
+const { calculatePricingBreakdown, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking, calculateHourlyExtension, toTwoDecimals } = require('../utils/pricingUtils');
+const { calculateExtendedCheckout } = require('../config/pricing.config');
 const AvailabilityService = require('../services/availability.service');
 
 const Notification = require('../models/Notification');
@@ -275,7 +276,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
         const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
         if (!hasUsed) {
           // Calculate subtotal first to apply coupon discount
-          const tempPricing = await calculateUnifiedPricing(pricingParams);
+          const tempPricing = await calculatePricingBreakdown(pricingParams);
           let discountAmount = 0;
           
           if (coupon.discountType === 'percentage') {
@@ -295,8 +296,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
       }
     }
 
-    // Calculate final pricing breakdown using UNIFIED SYSTEM (BACKEND ONLY)
-    const pricing = await calculateUnifiedPricing(pricingParams);
+    // Calculate final pricing breakdown using unified utilities
+    const pricing = await calculatePricingBreakdown(pricingParams);
     
     // Extract values for backward compatibility
     const {
@@ -309,10 +310,14 @@ const processPaymentAndCreateBooking = async (req, res) => {
       breakdown
     } = pricing;
 
+    // Normalize incoming dates to Date objects
+    const checkInDateObj = checkIn ? new Date(checkIn) : null;
+    const checkOutDateObj = checkOut ? new Date(checkOut) : null;
+
     // Handle checkout time calculation based on booking type
-    let finalCheckOut = checkOut;
+    let finalCheckOut = checkOutDateObj;
     let finalCheckOutTime = checkOutTime || (bookingType === 'property' ? (listing.checkOutTime || '10:00') : undefined);
-    let bookingCheckInDateTime = checkIn;
+    let bookingCheckInDateTime = checkInDateObj;
     let bookingCheckOutDateTime = finalCheckOut;
     let totalHours = 24;
     let hostBufferTime = 2;
@@ -333,7 +338,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
     } else if (bookingType === 'property' && hourlyExtension && hourlyExtension.hours) {
       // Regular hourly extension logic
       const extensionInfo = calculateExtendedCheckout(
-        checkOut, 
+        finalCheckOut, 
         hourlyExtension.hours, 
         finalCheckOutTime
       );
@@ -343,7 +348,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
       finalCheckOutTime = extensionInfo.checkoutTime;
       
       console.log(`🕐 Hourly extension applied: +${hourlyExtension.hours} hours`);
-      console.log(`📅 Original checkout: ${checkOut.toISOString()}`);
+      console.log(`📅 Original checkout: ${finalCheckOut.toISOString()}`);
       console.log(`📅 New checkout: ${finalCheckOut.toISOString()}`);
       console.log(`⏰ New checkout time: ${finalCheckOutTime}`);
       console.log(`📆 Extends to next day: ${extensionInfo.isNextDay}`);
@@ -358,7 +363,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
       bookingType,
       bookingDuration: is24HourBooking ? '24hour' : 'daily',
       status: 'pending', // Will be updated to confirmed after payment
-      checkIn: bookingType === 'property' ? checkIn : undefined,
+      checkIn: bookingType === 'property' ? checkInDateObj : undefined,
       checkOut: bookingType === 'property' ? finalCheckOut : undefined,
       // NEW: 24-hour booking fields
       checkInDateTime: is24HourBooking ? bookingCheckInDateTime : undefined,
@@ -874,7 +879,7 @@ const createBooking = async (req, res) => {
         const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
         if (!hasUsed) {
           // Calculate subtotal first to apply coupon discount
-          const tempPricing = await calculateUnifiedPricing(pricingParams);
+          const tempPricing = await calculatePricingBreakdown(pricingParams);
           let discountAmount = 0;
           
           if (coupon.discountType === 'percentage') {
@@ -898,8 +903,8 @@ const createBooking = async (req, res) => {
       }
     }
 
-    // Calculate final pricing breakdown using UNIFIED SYSTEM (BACKEND ONLY)
-    const pricing = await calculateUnifiedPricing(pricingParams);
+    // Calculate final pricing breakdown using unified utilities
+    const pricing = await calculatePricingBreakdown(pricingParams);
     
     // Extract values for backward compatibility
     const {
@@ -3217,8 +3222,8 @@ const calculateHourlyPrice = async (req, res) => {
       });
     }
 
-    // Calculate final pricing breakdown using UNIFIED SYSTEM (BACKEND ONLY)
-    const pricing = await calculateUnifiedPricing(pricingParams);
+    // Calculate final pricing breakdown using unified utilities
+    const pricing = await calculatePricingBreakdown(pricingParams);
 
     // Create hourly-specific breakdown for display
     const hourlyBreakdown = hourlyExtension ? {

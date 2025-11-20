@@ -1,7 +1,8 @@
 const Property = require('../models/Property');
 const PricingConfig = require('../models/PricingConfig');
 const Coupon = require('../models/Coupon');
-const { calculate24HourPricing, calculatePricingBreakdown } = require('../utils/pricingUtils');
+const { calculate24HourPricing, calculatePricingBreakdown, calculateHourlyExtension } = require('../utils/pricingUtils');
+const { generatePricingToken } = require('../middlewares/pricingSecurity.middleware');
 
 // @desc    Get platform fee rate
 // @route   GET /api/pricing/platform-fee-rate
@@ -35,32 +36,63 @@ const getPlatformFeeRate = async (req, res) => {
   }
 };
 
-// @desc    Calculate pricing for a booking
+// @desc    Calculate pricing for a booking (consolidated with secure flow features)
 // @route   POST /api/pricing/calculate
-// @access  Private
+// @access  Public
 const calculatePricing = async (req, res) => {
   try {
     const {
       propertyId,
       checkIn,
       checkOut,
-      guests,
-      hourlyExtension = 0,
+      guests = { adults: 1, children: 0 },
+      hourlyExtension = 0, // hours: 6, 12, 18 for daily flow
       couponCode,
       bookingType = 'daily',
       checkInDateTime,
       extensionHours = 0
     } = req.body;
 
-    // Validate required fields
-    if (!propertyId || !checkIn || !checkOut || !guests) {
+    // Validate required fields and basic correctness (from secure flow)
+    const errors = [];
+    if (!propertyId) errors.push('Property ID is required');
+    if (!checkIn) errors.push('Check-in date is required');
+    if (!checkOut) errors.push('Check-out date is required');
+    if (!guests || !guests.adults) errors.push('Guest count is required');
+
+    if (checkIn && checkOut) {
+      const inDate = new Date(checkIn);
+      const outDate = new Date(checkOut);
+      const now = new Date();
+      if (isNaN(inDate.getTime())) errors.push('Invalid check-in date format');
+      if (isNaN(outDate.getTime())) errors.push('Invalid check-out date format');
+      // Normalize to date-only for comparisons so same-day check-in is allowed
+      const inDateOnly = new Date(inDate.getFullYear(), inDate.getMonth(), inDate.getDate());
+      const outDateOnly = new Date(outDate.getFullYear(), outDate.getMonth(), outDate.getDate());
+      const todayOnly = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      if (inDateOnly < todayOnly) errors.push('Check-in date cannot be in the past');
+      if (outDateOnly <= inDateOnly) errors.push('Check-out date must be after check-in date');
+      const maxDuration = 365 * 24 * 60 * 60 * 1000;
+      if (outDateOnly - inDateOnly > maxDuration) errors.push('Booking duration cannot exceed 1 year');
+    }
+
+    if (hourlyExtension) {
+      const validHours = [6, 12, 18];
+      if (!validHours.includes(hourlyExtension)) errors.push('Hourly extension must be 6, 12, or 18 hours');
+    }
+    if (extensionHours && (extensionHours < 0 || extensionHours > 24)) {
+      errors.push('Extension hours must be between 0 and 24');
+    }
+
+    if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields: propertyId, checkIn, checkOut, guests'
+        message: 'Invalid pricing request parameters',
+        errors
       });
     }
 
-    // Get property details
+    // Get and validate property details (from secure flow)
     const property = await Property.findById(propertyId);
     if (!property) {
       return res.status(404).json({
@@ -69,94 +101,128 @@ const calculatePricing = async (req, res) => {
       });
     }
 
-    // Get pricing configuration
-    const pricingConfig = await PricingConfig.findOne().sort({ createdAt: -1 });
-    if (!pricingConfig) {
-      return res.status(500).json({
+    if (property.status && !['published', 'active'].includes(property.status)) {
+      return res.status(403).json({
         success: false,
-        message: 'Pricing configuration not found'
+        message: 'Property is not available for booking'
+      });
+    }
+    if (property.approvalStatus && property.approvalStatus !== 'approved') {
+      return res.status(403).json({
+        success: false,
+        message: 'Property is not approved for booking'
       });
     }
 
-    // Calculate nights or hours based on booking type
+    // Try to read pricing configuration, but do not fail if missing (fallbacks exist)
+    let pricingConfig = null;
+    try {
+      pricingConfig = await PricingConfig.findOne().sort({ createdAt: -1 });
+    } catch (e) {
+      console.warn('⚠️ Unable to fetch PricingConfig, proceeding with defaults');
+    }
+
+    // Calculate nights using date-only comparison (align with secure flow)
     const checkInDate = new Date(checkIn);
     const checkOutDate = new Date(checkOut);
-    const nights = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
-    const totalHours = bookingType === '24hour' ? (24 + extensionHours) : (nights * 24);
+    const checkInDateOnly = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+    const checkOutDateOnly = new Date(checkOutDate.getFullYear(), checkOutDate.getMonth(), checkOutDate.getDate());
+    const diffTime = checkOutDateOnly - checkInDateOnly;
+    const diffDays = diffTime / (1000 * 60 * 60 * 24);
+    const nights = Math.max(0, diffDays);
+    // Treat as 24-hour ONLY when explicitly requested by bookingType
+    const is24HourBooking = bookingType === '24hour';
+    const totalHours = is24HourBooking ? (24 + (extensionHours || 0)) : undefined;
 
     // Determine base price
     let basePrice;
-    if (bookingType === '24hour' && property.pricing?.basePrice24Hour) {
+    if (is24HourBooking && property.pricing?.basePrice24Hour) {
       basePrice = property.pricing.basePrice24Hour;
     } else {
       basePrice = property.pricing?.basePrice || 0;
     }
 
     // Calculate extra guest cost
-    const extraGuests = Math.max(0, (guests.adults || 0) - (property.maxGuests || 1));
+    const extraGuests = guests.adults > 1 ? guests.adults - 1 : 0;
     const extraGuestCost = extraGuests * (property.pricing?.extraGuestPrice || 0);
 
-    // Calculate pricing breakdown
-    let pricingBreakdown;
-    if (bookingType === '24hour') {
-      pricingBreakdown = calculate24HourPricing({
-        basePrice24Hour: basePrice,
-        totalHours,
-        extraGuestPrice: property.pricing?.extraGuestPrice || 0,
-        extraGuests,
-        cleaningFee: property.pricing?.cleaningFee || 0,
-        serviceFee: property.pricing?.serviceFee || 0,
-        securityDeposit: property.pricing?.securityDeposit || 0,
-        hourlyExtension: hourlyExtension,
-        discountAmount: 0, // Will be calculated if coupon is applied
-        currency: 'INR',
-        platformFeeRate: pricingConfig.platformFeeRate
-      });
+    // Build pricing parameters, including extension costs like secure/route logic
+    let pricingParams = {
+      basePrice,
+      nights,
+      cleaningFee: property.pricing?.cleaningFee || 0,
+      serviceFee: property.pricing?.serviceFee || 0,
+      securityDeposit: property.pricing?.securityDeposit || 0,
+      extraGuestPrice: property.pricing?.extraGuestPrice || 0,
+      extraGuests,
+      hourlyExtension: 0, // cost, not hours
+      discountAmount: 0,
+      currency: property.pricing?.currency || 'INR',
+      bookingType: is24HourBooking ? '24hour' : 'daily'
+    };
+
+    if (is24HourBooking) {
+      // 24-hour pricing with optional extensionHours cost baked into baseAmount
+      pricingParams.basePrice24Hour = property.pricing?.basePrice24Hour || basePrice;
+      pricingParams.totalHours = 24 + (extensionHours || 0);
+      // Note: calculate24HourPricing adds extension when totalHours > 24; pricingParams.hourlyExtension remains 0 here
     } else {
-      pricingBreakdown = calculatePricingBreakdown({
-        basePrice,
-        nights,
-        extraGuestPrice: property.pricing?.extraGuestPrice || 0,
-        extraGuests,
-        cleaningFee: property.pricing?.cleaningFee || 0,
-        serviceFee: property.pricing?.serviceFee || 0,
-        securityDeposit: property.pricing?.securityDeposit || 0,
-        hourlyExtension: hourlyExtension,
-        discountAmount: 0, // Will be calculated if coupon is applied
-        currency: 'INR',
-        platformFeeRate: pricingConfig.platformFeeRate
-      });
+      // Daily flow: compute hourly extension cost if applicable
+      if (hourlyExtension && hourlyExtension > 0 && property.hourlyBooking?.enabled) {
+        const extensionCost = calculateHourlyExtension(property.pricing?.basePrice || basePrice, hourlyExtension);
+        pricingParams.hourlyExtension = extensionCost;
+      }
     }
+
+    // Calculate pricing breakdown via shared utilities (single source)
+    const pricingBreakdown = await calculatePricingBreakdown(pricingParams);
 
     // Apply coupon discount if provided
     let discountAmount = 0;
     if (couponCode) {
-      const coupon = await Coupon.findOne({ 
-        code: couponCode,
-        isActive: true,
-        validFrom: { $lte: new Date() },
-        validUntil: { $gte: new Date() }
-      });
+      try {
+        const coupon = await Coupon.findOne({ 
+          code: couponCode.toUpperCase(),
+          isActive: true,
+          validFrom: { $lte: new Date() },
+          validTo: { $gte: new Date() }
+        });
 
-      if (coupon) {
-        if (coupon.discountType === 'percentage') {
-          discountAmount = (pricingBreakdown.subtotal * coupon.discountValue) / 100;
-        } else {
-          discountAmount = coupon.discountValue;
+        if (coupon) {
+          if (coupon.discountType === 'percentage') {
+            discountAmount = (pricingBreakdown.hostSubtotal * coupon.amount) / 100;
+            const maxDiscount = coupon.maxDiscount || discountAmount;
+            discountAmount = Math.min(discountAmount, maxDiscount);
+          } else {
+            discountAmount = Math.min(coupon.amount, pricingBreakdown.hostSubtotal);
+          }
+
+          // Recalculate pricing with discount
+          const discountedParams = { ...pricingParams, discountAmount };
+          const discountedPricing = await calculatePricingBreakdown(discountedParams);
+          // overwrite with discounted values
+          Object.assign(pricingBreakdown, discountedPricing);
         }
-        
-        // Update pricing breakdown with discount
-        pricingBreakdown.discountAmount = discountAmount;
-        pricingBreakdown.subtotal = pricingBreakdown.subtotal - discountAmount;
-        pricingBreakdown.totalAmount = pricingBreakdown.subtotal + pricingBreakdown.platformFee + pricingBreakdown.gst + pricingBreakdown.processingFee;
+      } catch (e) {
+        console.error('Error applying coupon:', e);
       }
     }
 
-    // Prepare response
+    // Generate a pricing token (from secure flow) for downstream validation if needed
+    const pricingToken = generatePricingToken({
+      propertyId,
+      checkIn,
+      checkOut,
+      guests,
+      nights,
+      totalAmount: pricingBreakdown.totalAmount
+    });
+
+    // Prepare response (preserve classic fields, add security + booking/property info)
     const response = {
-      baseAmount: basePrice,
-      nights: bookingType === 'daily' ? nights : undefined,
-      totalHours: bookingType === '24hour' ? totalHours : undefined,
+      baseAmount: pricingBreakdown.baseAmount,
+      nights: is24HourBooking ? 1 : nights,
+      totalHours: is24HourBooking ? (pricingParams.totalHours || 24) : undefined,
       extraGuests,
       extraGuestCost,
       cleaningFee: pricingBreakdown.cleaningFee,
@@ -173,14 +239,44 @@ const calculatePricing = async (req, res) => {
       gst: pricingBreakdown.gst,
       totalAmount: pricingBreakdown.totalAmount,
       hostEarning: pricingBreakdown.hostEarning,
-      currency: 'INR',
-      platformFeeRate: pricingConfig.platformFeeRate,
-      breakdown: pricingBreakdown.breakdown
+      currency: pricingBreakdown.currency,
+      platformFeeRate: pricingBreakdown.platformFeeRate,
+      breakdown: pricingBreakdown.breakdown,
+      bookingType: pricingParams.bookingType
     };
 
     res.status(200).json({
       success: true,
-      data: { pricing: response }
+      data: { 
+        pricing: response,
+        security: {
+          pricingToken,
+          calculatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+        },
+        property: {
+          id: property._id,
+          title: property.title,
+          maxGuests: property.maxGuests,
+          minNights: property.minNights,
+          checkInTime: property.checkInTime,
+          checkOutTime: property.checkOutTime,
+          cancellationPolicy: property.cancellationPolicy,
+          basePrice: property.pricing?.basePrice,
+          basePrice24Hour: property.pricing?.basePrice24Hour,
+          enable24HourBooking: property.enable24HourBooking,
+          hourlyBooking: property.hourlyBooking
+        },
+        booking: {
+          checkIn,
+          checkOut,
+          checkInDateTime,
+          guests,
+          nights,
+          totalHours: is24HourBooking ? (pricingParams.totalHours || 24) : undefined,
+          bookingType: pricingParams.bookingType
+        }
+      }
     });
 
   } catch (error) {
@@ -195,7 +291,7 @@ const calculatePricing = async (req, res) => {
 
 // @desc    Validate coupon code
 // @route   POST /api/pricing/validate-coupon
-// @access  Private
+// @access  Public
 const validateCoupon = async (req, res) => {
   try {
     const { couponCode, propertyId, checkIn, checkOut, guests } = req.body;
@@ -207,12 +303,12 @@ const validateCoupon = async (req, res) => {
       });
     }
 
-    // Find active coupon
+    // Find active coupon (align with model fields)
     const coupon = await Coupon.findOne({
-      code: couponCode,
+      code: couponCode.toUpperCase(),
       isActive: true,
       validFrom: { $lte: new Date() },
-      validUntil: { $gte: new Date() }
+      validTo: { $gte: new Date() }
     });
 
     if (!coupon) {
@@ -222,9 +318,9 @@ const validateCoupon = async (req, res) => {
       });
     }
 
-    // Check if coupon is applicable to this property
-    if (coupon.applicableProperties && coupon.applicableProperties.length > 0) {
-      if (!coupon.applicableProperties.includes(propertyId)) {
+    // Check if coupon is applicable to this property (field names may differ)
+    if (coupon.applicableToListings && coupon.applicableToListings.length > 0) {
+      if (!coupon.applicableToListings.map(String).includes(String(propertyId))) {
         return res.status(400).json({
           success: false,
           message: 'This coupon is not applicable to the selected property'
@@ -235,7 +331,10 @@ const validateCoupon = async (req, res) => {
     // Calculate discount amount (simplified for validation)
     const checkInDate = new Date(checkIn);
     const checkOutDate = new Date(checkOut);
-    const nights = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
+    const checkInDateOnly = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+    const checkOutDateOnly = new Date(checkOutDate.getFullYear(), checkOutDate.getMonth(), checkOutDate.getDate());
+    const diffTime = checkOutDateOnly - checkInDateOnly;
+    const nights = Math.max(0, diffTime / (1000 * 60 * 60 * 24));
     
     // Get property for base price calculation
     const property = await Property.findById(propertyId);
@@ -247,13 +346,15 @@ const validateCoupon = async (req, res) => {
     }
 
     const basePrice = property.pricing?.basePrice || 0;
-    const subtotal = basePrice * nights; // Simplified calculation for validation
+    const subtotal = basePrice * (nights || 1); // Avoid zero for same-day validation
     
     let discountAmount;
     if (coupon.discountType === 'percentage') {
-      discountAmount = (subtotal * coupon.discountValue) / 100;
+      discountAmount = (subtotal * coupon.amount) / 100;
+      const maxDiscount = coupon.maxDiscount || discountAmount;
+      discountAmount = Math.min(discountAmount, maxDiscount);
     } else {
-      discountAmount = Math.min(coupon.discountValue, subtotal);
+      discountAmount = Math.min(coupon.amount, subtotal);
     }
 
     res.status(200).json({
@@ -263,7 +364,7 @@ const validateCoupon = async (req, res) => {
           code: coupon.code,
           discountAmount: Math.round(discountAmount * 100) / 100,
           discountType: coupon.discountType,
-          description: coupon.description || `Get ${coupon.discountValue}${coupon.discountType === 'percentage' ? '%' : '₹'} off your booking`
+          description: coupon.description || `Get ${coupon.amount}${coupon.discountType === 'percentage' ? '%' : '₹'} off your booking`
         }
       }
     });
