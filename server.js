@@ -60,6 +60,18 @@ setTimeout(async () => {
 const helmet = createHelmet();
 const rateLimiters = createRateLimiters();
 
+// Helper function to normalize URLs (remove trailing slashes, ensure protocol)
+const normalizeOrigin = (url) => {
+  if (!url) return null;
+  // Remove trailing slashes
+  let normalized = url.trim().replace(/\/+$/, '');
+  // If no protocol, assume https for production
+  if (!normalized.match(/^https?:\/\//)) {
+    normalized = `https://${normalized}`;
+  }
+  return normalized;
+};
+
 // CORS configuration
 const corsOptions = {
   origin: function (origin, callback) {
@@ -73,13 +85,14 @@ const corsOptions = {
     
     // Add FRONTEND_URL if set
     if (process.env.FRONTEND_URL) {
-      allowedOrigins.push(process.env.FRONTEND_URL);
+      const normalized = normalizeOrigin(process.env.FRONTEND_URL);
+      if (normalized) allowedOrigins.push(normalized);
     }
     
     // Add ALLOWED_ORIGINS if set (comma-separated list)
     if (process.env.ALLOWED_ORIGINS) {
       const additionalOrigins = process.env.ALLOWED_ORIGINS.split(',')
-        .map(url => url.trim())
+        .map(url => normalizeOrigin(url))
         .filter(url => url);
       allowedOrigins.push(...additionalOrigins);
     }
@@ -89,12 +102,21 @@ const corsOptions = {
       return callback(null, true);
     }
     
-    // Check if origin is in allowed list
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    // Normalize the incoming origin
+    const normalizedOrigin = normalizeOrigin(origin);
+    
+    // Check if origin is in allowed list (case-insensitive comparison)
+    const isAllowed = allowedOrigins.some(allowed => {
+      const normalizedAllowed = normalizeOrigin(allowed);
+      return normalizedAllowed && normalizedAllowed.toLowerCase() === normalizedOrigin.toLowerCase();
+    });
+    
+    if (isAllowed) {
       callback(null, true);
     } else {
       // Log for debugging
       console.log('🚫 CORS blocked origin:', origin);
+      console.log('🔍 Normalized origin:', normalizedOrigin);
       console.log('✅ Allowed origins:', allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     }
@@ -125,6 +147,20 @@ app.use('/api/auth', rateLimiters.login);
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
+});
+
+// Root route handler (for health checks from Render, etc.)
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'TripMe Backend API is running',
+    timestamp: new Date().toISOString(),
+    version: process.env.npm_package_version || '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      api: '/api'
+    }
+  });
 });
 
 // Health check endpoint
