@@ -1,67 +1,72 @@
+/**
+ * Create Admin User Script
+ * 
+ * Creates an admin entry in the admins collection
+ */
+
 const mongoose = require('mongoose');
-const Admin = require('../models/Admin');
+const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
-const createAdmin = async () => {
+const ADMIN_EMAIL = 'admin1@tripme.com';
+const ADMIN_PASSWORD = 'Admin@123';
+const ADMIN_NAME = 'Admin User';
+
+async function createAdmin() {
   try {
-    // Connect to database
-    await mongoose.connect(process.env.MONGO_URI);
-    console.log('Connected to database');
+    console.log('👤 Create Admin Script');
+    console.log('======================\n');
+
+    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    await mongoose.connect(mongoUri);
+    console.log('✅ Connected to MongoDB\n');
+
+    const db = mongoose.connection.db;
+    const adminsCollection = db.collection('admins');
 
     // Check if admin already exists
-    const existingAdmin = await Admin.findOne({ email: 'admin@tripme.com' });
+    const existingAdmin = await adminsCollection.findOne({ email: ADMIN_EMAIL });
+    
     if (existingAdmin) {
-      console.log('Admin already exists');
-      process.exit(0);
+      console.log('⚠️ Admin already exists. Updating password...');
+      const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, 12);
+      await adminsCollection.updateOne(
+        { email: ADMIN_EMAIL },
+        { $set: { password: hashedPassword, updatedAt: new Date() } }
+      );
+      console.log('✅ Password updated!\n');
+    } else {
+      console.log('📝 Creating new admin...');
+      const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, 12);
+      
+      await adminsCollection.insertOne({
+        name: ADMIN_NAME,
+        email: ADMIN_EMAIL,
+        password: hashedPassword,
+        role: 'admin',
+        isActive: true,
+        permissions: ['all'],
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      console.log('✅ Admin created!\n');
     }
 
-    // Create admin user
-    const adminPassword = process.env.ADMIN_PASSWORD || 'TempPassword123!@#';
-    const admin = await Admin.create({
-      name: 'TripMe Admin',
-      email: 'admin@tripme.com',
-      password: adminPassword,
-      role: 'super-admin',
-      permissions: [
-        {
-          module: 'users',
-          canView: true,
-          canEdit: true,
-          canDelete: true
-        },
-        {
-          module: 'properties',
-          canView: true,
-          canEdit: true,
-          canDelete: true
-        },
-        {
-          module: 'bookings',
-          canView: true,
-          canEdit: true,
-          canDelete: true
-        },
-        {
-          module: 'kyc',
-          canView: true,
-          canEdit: true,
-          canDelete: true
-        }
-      ]
-    });
+    console.log('================================');
+    console.log('🎉 ADMIN READY');
+    console.log('================================');
+    console.log(`📧 Email: ${ADMIN_EMAIL}`);
+    console.log(`🔑 Password: ${ADMIN_PASSWORD}`);
+    console.log('🔗 Login at: /admin/login');
+    console.log('================================\n');
 
-    console.log('Admin created successfully:', {
-      id: admin._id,
-      name: admin.name,
-      email: admin.email,
-      role: admin.role
-    });
+    await mongoose.disconnect();
+    console.log('📡 Disconnected from MongoDB');
 
-    process.exit(0);
   } catch (error) {
-    console.error('Error creating admin:', error);
-    process.exit(1);
+    console.error('❌ Error:', error.message);
+    await mongoose.disconnect();
   }
-};
+}
 
-createAdmin(); 
+createAdmin();

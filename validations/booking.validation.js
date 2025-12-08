@@ -19,11 +19,12 @@ const validateBooking = (req, res, next) => {
       .messages({
         'string.base': 'Service ID must be a string'
       }),
+    // FIXED: Removed .greater('now') - same-day booking is allowed
+    // Date validation (past dates) is done in controller using date-only comparison
     checkIn: Joi.date()
-      .greater('now')
       .required()
       .messages({
-        'date.greater': 'Check-in date must be in the future',
+        'date.base': 'Check-in date must be a valid date',
         'any.required': 'Check-in date is required'
       }),
     checkOut: Joi.date()
@@ -109,6 +110,13 @@ const validateBooking = (req, res, next) => {
       .optional()
       .messages({
         'boolean.base': 'Terms agreement must be a boolean value'
+      }),
+    // Custom check-in time (HH:mm format) - for hourly booking with custom times
+    checkInTime: Joi.string()
+      .pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/)
+      .optional()
+      .messages({
+        'string.pattern.base': 'Check-in time must be in HH:mm format'
       }),
     hourlyExtension: Joi.object({
       hours: Joi.number()
@@ -245,11 +253,11 @@ const validateBooking = (req, res, next) => {
 // Update booking validation
 const validateBookingUpdate = (req, res, next) => {
   const schema = Joi.object({
+    // FIXED: Removed .greater('now') - same-day booking is allowed
     checkIn: Joi.date()
-      .greater('now')
       .optional()
       .messages({
-        'date.greater': 'Check-in date must be in the future'
+        'date.base': 'Check-in date must be a valid date'
       }),
     checkOut: Joi.date()
       .greater(Joi.ref('checkIn'))
@@ -312,6 +320,13 @@ const validateBookingUpdate = (req, res, next) => {
           'string.email': 'Please provide a valid email address'
         })
     }).optional(),
+    // Custom check-in time (HH:mm format) - for hourly booking with custom times
+    checkInTime: Joi.string()
+      .pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/)
+      .optional()
+      .messages({
+        'string.pattern.base': 'Check-in time must be in HH:mm format'
+      }),
     hourlyExtension: Joi.object({
       hours: Joi.number()
         .valid(6, 12, 18)
@@ -397,11 +412,11 @@ const validatePriceCalculation = (req, res, next) => {
       .messages({
         'string.base': 'Service ID must be a string'
       }),
+    // FIXED: Removed .greater('now') - same-day booking is allowed
     checkIn: Joi.date()
-      .greater('now')
       .required()
       .messages({
-        'date.greater': 'Check-in date must be in the future',
+        'date.base': 'Check-in date must be a valid date',
         'any.required': 'Check-in date is required'
       }),
     checkOut: Joi.date()

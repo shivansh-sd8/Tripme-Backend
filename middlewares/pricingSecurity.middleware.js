@@ -94,7 +94,11 @@ function validatePricingRequest(req, res, next) {
       errors.push('Invalid check-out date format');
     }
     
-    if (checkInDate < now) {
+    // FIXED: Normalize to date-only for comparison so same-day check-in is allowed
+    const checkInDateOnly = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+    const todayOnly = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    if (checkInDateOnly < todayOnly) {
       errors.push('Check-in date cannot be in the past');
     }
     

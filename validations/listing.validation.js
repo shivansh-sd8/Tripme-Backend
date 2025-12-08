@@ -803,11 +803,11 @@ const validateListingSearch = (req, res, next) => {
         'string.min': 'Location must be at least 2 characters long',
         'string.max': 'Location cannot exceed 200 characters'
       }),
+    // FIXED: Removed .greater('now') - same-day check-in is allowed
     checkIn: Joi.date()
-      .greater('now')
       .optional()
       .messages({
-        'date.greater': 'Check-in date must be in the future'
+        'date.base': 'Check-in date must be a valid date'
       }),
     checkOut: Joi.date()
       .greater(Joi.ref('checkIn'))

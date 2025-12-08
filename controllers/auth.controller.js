@@ -98,6 +98,7 @@ const loginUser = async (req, res) => {
     // Check if user exists
     const user = await User.findOne({ email }).select('+password');
     if (!user) {
+       console.log("❌ Email not found");
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -107,6 +108,7 @@ const loginUser = async (req, res) => {
     // Check if password is correct
     const isPasswordCorrect = await user.comparePassword(password);
     if (!isPasswordCorrect) {
+      console.log("invalid passwoerd");
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -123,7 +125,7 @@ const loginUser = async (req, res) => {
       } else if (user.accountStatus === 'deactivated') {
         message = 'Account is deactivated. Please contact support to reactivate.';
       }
-      
+      console.log("❌ Account blocked:", user.accountStatus);
       return res.status(401).json({
         success: false,
         message
@@ -132,6 +134,7 @@ const loginUser = async (req, res) => {
 
     // Check if email is verified
     if (!user.isVerified) {
+      console.log("❌ Email not verified");
       return res.status(401).json({
         success: false,
         message: 'Please verify your email before logging in. Check your inbox for the verification link.'
@@ -905,7 +908,7 @@ const validateResetToken = async (req, res) => {
 const adminLogin = async (req, res) => {
   try {
     const { email, password } = req.body;
-
+    console.log("request received admin login");
     // Check if admin exists
     const admin = await Admin.findOne({ email }).select('+password');
     if (!admin) {
