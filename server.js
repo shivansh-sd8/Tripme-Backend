@@ -178,6 +178,24 @@ app.use(notFound);
 // Error handler
 app.use(errorHandler);
 
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err, promise) => {
+  console.error('❌ Unhandled Promise Rejection:', err);
+  console.error('Stack:', err.stack);
+  // Don't exit in production, just log
+  if (process.env.NODE_ENV !== 'production') {
+    console.error('Promise:', promise);
+  }
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  console.error('Stack:', err.stack);
+  // In production, you might want to exit gracefully
+  // process.exit(1);
+});
+
 app.listen(port, '0.0.0.0', () => {
   console.log(`✅ Backend server running on port ${port}`);
   console.log(`🌐 Server URL: http://localhost:${port}`);

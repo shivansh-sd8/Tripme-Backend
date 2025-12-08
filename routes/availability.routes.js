@@ -4,9 +4,23 @@ const availabilityController = require('../controllers/availability.controller')
 const { auth, optionalAuth } = require('../middlewares/auth.middleware');
 const AuthorizationMiddleware = require('../middlewares/authorization.middleware');
 
-// Public routes - Anyone can check availability
+// ========================================
+// OLD: Public routes - Anyone can check availability
+// ========================================
 router.get('/:propertyId', optionalAuth, availabilityController.getPropertyAvailability);
 router.get('/:propertyId/range', optionalAuth, availabilityController.getAvailabilityRange);
+
+// ========================================
+// NEW: Hourly availability routes (comment out if issues)
+// These routes use the new AvailabilityEvent model for precise hourly tracking
+// ========================================
+router.get('/:propertyId/hourly', optionalAuth, availabilityController.getHourlyAvailability);
+router.get('/:propertyId/events', optionalAuth, availabilityController.getPropertyEvents);
+router.get('/:propertyId/next-slot', optionalAuth, availabilityController.getNextAvailableSlot);
+router.get('/:propertyId/check-slot', optionalAuth, availabilityController.checkTimeSlotAvailability);
+// ========================================
+// END NEW: Hourly availability routes
+// ========================================
 
 // Admin cleanup route (admin only)
 router.post('/cleanup', auth, availabilityController.manualCleanup);
@@ -28,5 +42,14 @@ router.delete('/:propertyId/:availabilityId', AuthorizationMiddleware.isProperty
 router.post('/:propertyId/bulk', AuthorizationMiddleware.isPropertyHost, availabilityController.bulkUpdateAvailability);
 router.post('/:propertyId/block-dates', AuthorizationMiddleware.isPropertyHost, availabilityController.blockDates);
 router.post('/:propertyId/unblock-dates', AuthorizationMiddleware.isPropertyHost, availabilityController.unblockDates);
+
+// ========================================
+// NEW: Maintenance time configuration (host only)
+// Comment out if issues
+// ========================================
+router.put('/:propertyId/maintenance-time', AuthorizationMiddleware.isPropertyHost, availabilityController.updateMaintenanceTime);
+// ========================================
+// END NEW: Maintenance time route
+// ========================================
 
 module.exports = router;

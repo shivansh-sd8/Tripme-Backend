@@ -118,7 +118,11 @@ function validateBookingParameters(bookingData) {
     const checkOut = new Date(bookingData.checkOut);
     const now = new Date();
     
-    if (checkIn < now) {
+    // FIXED: Normalize to date-only for comparison so same-day check-in is allowed
+    const checkInDateOnly = new Date(checkIn.getFullYear(), checkIn.getMonth(), checkIn.getDate());
+    const todayOnly = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    if (checkInDateOnly < todayOnly) {
       errors.push('Check-in date cannot be in the past');
     }
     

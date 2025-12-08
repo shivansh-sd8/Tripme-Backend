@@ -6,8 +6,14 @@ const Payment = require('../models/Payment');
 const Coupon = require('../models/Coupon');
 const Availability = require('../models/Availability');
 const { calculatePricingBreakdown, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking, calculateHourlyExtension, toTwoDecimals } = require('../utils/pricingUtils');
-const { calculateExtendedCheckout } = require('../config/pricing.config');
+const { calculateExtendedCheckout, getAdditionalDatesForExtension } = require('../config/pricing.config');
 const AvailabilityService = require('../services/availability.service');
+
+// ========================================
+// NEW: Import AvailabilityEvent Service for flexible hourly booking with maintenance
+// If this causes issues, you can comment out this line and the related code blocks below
+// ========================================
+const AvailabilityEventService = require('../services/availabilityEvent.service');
 
 const Notification = require('../models/Notification');
 const RefundService = require('../services/refundService');
@@ -51,6 +57,13 @@ const processPaymentAndCreateBooking = async (req, res) => {
       extensionHours,
       bookingDuration
     } = req.body;
+    
+    // DEBUG: Log received checkInTime
+    console.log('🕐 DEBUG - Received booking request:');
+    console.log('   checkInTime from frontend:', checkInTime);
+    console.log('   hourlyExtension:', hourlyExtension);
+    console.log('   checkIn:', checkIn);
+    console.log('   checkOut:', checkOut);
     
     // Generate idempotency key if not provided
     const finalIdempotencyKey = idempotencyKey || require('crypto').randomUUID();
@@ -335,23 +348,54 @@ const processPaymentAndCreateBooking = async (req, res) => {
       
       console.log(`🕐 24-hour booking: Check-in ${bookingCheckInDateTime.toISOString()}, Check-out ${bookingCheckOutDateTime.toISOString()}`);
       console.log(`⏰ Total hours: ${totalHours}, Next available: ${nextAvailableTime.toISOString()}`);
-    } else if (bookingType === 'property' && hourlyExtension && hourlyExtension.hours) {
-      // Regular hourly extension logic
+    } else if (bookingType === 'property') {
+      // NEW: Custom check-in time handling for hourly booking properties
+      // Checkout = checkOutDate at (check-in time - 1 hour) + extension
+      // Example: Check-in Dec 5 at 4 PM, Checkout date Dec 7 → Checkout: Dec 7 at 3 PM
+      if (checkInTime && listing.hourlyBooking?.enabled) {
+        console.log(`🕐 Custom check-in time booking: ${checkInTime}`);
+        
+        // Parse custom check-in time
+        const [checkInHour, checkInMinute] = checkInTime.split(':').map(Number);
+        
+        // Use the checkout DATE as the base, set time to (check-in time - 1 hour)
+        let customCheckOut = new Date(checkOutDateObj);
+        customCheckOut.setHours(checkInHour - 1, checkInMinute, 0, 0);
+        
+        // Add extension hours if applicable
+        const extensionHrs = hourlyExtension?.hours || 0;
+        if (extensionHrs > 0) {
+          customCheckOut.setHours(customCheckOut.getHours() + extensionHrs);
+          console.log(`🕐 Extension applied: +${extensionHrs} hours`);
+        }
+        
+        // Update checkout time string
+        finalCheckOut = customCheckOut;
+        finalCheckOutTime = `${customCheckOut.getHours().toString().padStart(2, '0')}:${customCheckOut.getMinutes().toString().padStart(2, '0')}`;
+        
+        console.log(`📅 Check-in date: ${checkInDateObj.toISOString()}`);
+        console.log(`📅 Checkout date (selected): ${checkOutDateObj.toISOString()}`);
+        console.log(`📅 Final checkout with time: ${finalCheckOut.toISOString()}`);
+        console.log(`⏰ Checkout time: ${finalCheckOutTime}`);
+      } else if (hourlyExtension && hourlyExtension.hours) {
+        // Regular hourly extension logic (fallback for non-custom time bookings)
       const extensionInfo = calculateExtendedCheckout(
         finalCheckOut, 
         hourlyExtension.hours, 
         finalCheckOutTime
       );
       
-      // Update checkout date and time based on extension
-      finalCheckOut = extensionInfo.checkoutDate;
+        // FIXED: Use newCheckout (full datetime) instead of checkoutDate (date only)
+        const originalCheckOut = new Date(finalCheckOut);
+        finalCheckOut = extensionInfo.newCheckout; // Full datetime with extension applied
       finalCheckOutTime = extensionInfo.checkoutTime;
       
       console.log(`🕐 Hourly extension applied: +${hourlyExtension.hours} hours`);
-      console.log(`📅 Original checkout: ${finalCheckOut.toISOString()}`);
+        console.log(`📅 Original checkout: ${originalCheckOut.toISOString()}`);
       console.log(`📅 New checkout: ${finalCheckOut.toISOString()}`);
       console.log(`⏰ New checkout time: ${finalCheckOutTime}`);
       console.log(`📆 Extends to next day: ${extensionInfo.isNextDay}`);
+      }
     }
 
     // Step 1: Create booking first (temporary, will be updated after payment)
@@ -372,8 +416,15 @@ const processPaymentAndCreateBooking = async (req, res) => {
       totalHours: is24HourBooking ? totalHours : undefined,
       hostBufferTime: is24HourBooking ? hostBufferTime : undefined,
       nextAvailableTime: is24HourBooking ? nextAvailableTime : undefined,
-      checkInTime: checkInTime || (bookingType === 'property' ? (listing.checkInTime || '11:00') : undefined),
-      checkOutTime: finalCheckOutTime,
+      checkInTime: (() => {
+        const savedTime = checkInTime || (bookingType === 'property' ? (listing.checkInTime || '11:00') : undefined);
+        console.log('🕐 DEBUG - Saving checkInTime:', savedTime, '| received:', checkInTime, '| listing default:', listing?.checkInTime);
+        return savedTime;
+      })(),
+      checkOutTime: (() => {
+        console.log('🕐 DEBUG - Saving checkOutTime:', finalCheckOutTime);
+        return finalCheckOutTime;
+      })(),
       timeSlot: bookingType === 'service' ? timeSlot : undefined,
       guests: guests,
       totalAmount,
@@ -550,15 +601,34 @@ const processPaymentAndCreateBooking = async (req, res) => {
           console.log('🔒 Blocking property dates for booking...');
           
           // Generate array of dates to block
-          const startDate = new Date(checkIn);
-          const endDate = new Date(finalCheckOut);
+          // FIXED: Use UTC date extraction to avoid timezone issues
+          // Extract YYYY-MM-DD directly from ISO strings to avoid timezone shifts
+          const checkInDate = new Date(checkIn);
+          const checkOutDate = new Date(finalCheckOut);
+          
+          // Get date strings in YYYY-MM-DD format (UTC)
+          const startDateStr = checkInDate.toISOString().split('T')[0];
+          const endDateStr = checkOutDate.toISOString().split('T')[0];
+          
           const datesToBlock = [];
           
-          let currentDate = new Date(startDate);
-          while (currentDate <= endDate) {
+          console.log('📅 Date blocking calculation:', {
+            checkIn: checkIn,
+            finalCheckOut: finalCheckOut,
+            startDateStr: startDateStr,
+            endDateStr: endDateStr,
+            hourlyExtension: hourlyExtension?.hours || 'none'
+          });
+          
+          // Generate all dates from check-in to check-out (inclusive)
+          let currentDate = new Date(startDateStr + 'T00:00:00.000Z');
+          const endDateForLoop = new Date(endDateStr + 'T00:00:00.000Z');
+          
+          while (currentDate <= endDateForLoop) {
             const dateStr = currentDate.toISOString().split('T')[0];
             datesToBlock.push(dateStr);
-            currentDate.setDate(currentDate.getDate() + 1);
+            console.log(`  → Adding date to block: ${dateStr}`);
+            currentDate.setUTCDate(currentDate.getUTCDate() + 1);
           }
           
           // Add additional dates for hourly extensions if they extend to next day
@@ -601,11 +671,104 @@ const processPaymentAndCreateBooking = async (req, res) => {
           console.log(`✅ Successfully blocked ${datesToBlock.length} property dates for booking`);
         }
         
+        // ========================================
+        // NEW: Create AvailabilityEvents for flexible hourly booking with maintenance
+        // This creates booking_start, booking_end, maintenance_start, maintenance_end events
+        // If this causes issues, comment out this entire block (lines marked NEW)
+        // ========================================
+        try {
+          // Get maintenance hours from property settings (default 2 hours)
+          const maintenanceHours = listing?.availabilitySettings?.hostBufferTime || 2;
+          
+          // Calculate actual checkout time with any hourly extension
+          let actualCheckOut = new Date(finalCheckOut);
+          if (hourlyExtension && hourlyExtension.hours) {
+            // Extension already applied to finalCheckOut
+            console.log(`🕐 Hourly extension of ${hourlyExtension.hours} hours applied`);
+          }
+          
+          // Create availability events
+          const eventResult = await AvailabilityEventService.createBookingEvents({
+            propertyId: actualListingId,
+            bookingId: booking._id,
+            userId: req.user._id,
+            checkIn: new Date(checkIn),
+            checkOut: actualCheckOut,
+            maintenanceHours: maintenanceHours
+          });
+          
+          if (eventResult.success) {
+            console.log(`✅ Created ${eventResult.events.length} availability events`);
+            console.log(`⏰ Next available time: ${eventResult.nextAvailableTime.toISOString()}`);
+            
+            // Update booking with next available time
+            booking.nextAvailableTime = eventResult.nextAvailableTime;
+            await booking.save();
+          }
+        } catch (eventError) {
+          console.error('⚠️ Error creating availability events:', eventError);
+          // Don't fail the booking if event creation fails - old system still works
+        }
+        // ========================================
+        // END NEW: AvailabilityEvents
+        // ========================================
+        
       } catch (availabilityError) {
         console.error('⚠️ Error blocking property availability:', availabilityError);
         // Don't fail the booking if availability blocking fails
         // The booking can still proceed, but dates won't be blocked
       }
+      
+      // ========================================
+      // NEW: Update availability from 'blocked' to 'booked' after successful payment
+      // ========================================
+      try {
+        console.log('🔄 Updating availability status from "blocked" to "booked"...');
+        
+        // Recalculate date strings (same logic as blocking section)
+        const checkInDate = new Date(checkIn);
+        const checkOutDate = new Date(finalCheckOut);
+        const startDateStr = checkInDate.toISOString().split('T')[0];
+        const endDateStr = checkOutDate.toISOString().split('T')[0];
+        
+        // Get all dates that were blocked for this booking
+        const datesToUpdate = [];
+        let currentDate = new Date(startDateStr + 'T00:00:00.000Z');
+        const endDateForLoop = new Date(endDateStr + 'T00:00:00.000Z');
+        
+        while (currentDate <= endDateForLoop) {
+          const dateStr = currentDate.toISOString().split('T')[0];
+          datesToUpdate.push(new Date(dateStr));
+          currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+        }
+        
+        // Update all blocked dates to booked
+        const updateResult = await Availability.updateMany(
+          {
+            property: actualListingId,
+            date: { $in: datesToUpdate },
+            status: 'blocked'
+          },
+          {
+            $set: {
+              status: 'booked',
+              reason: 'Confirmed booking',
+              bookedBy: booking._id,
+              bookedAt: new Date()
+            },
+            $unset: {
+              blockedBy: 1,
+              blockedAt: 1
+            }
+          }
+        );
+        
+        console.log(`✅ Successfully updated ${updateResult.modifiedCount} dates from "blocked" to "booked"`);
+      } catch (updateError) {
+        console.error('⚠️ Error updating availability status to booked:', updateError);
+        // Don't fail the booking if status update fails
+      }
+      // ========================================
     }
 
     // Step 5: Create notification for host
@@ -1421,6 +1584,67 @@ const rejectBooking = async (req, res) => {
     
     await booking.save();
 
+    // ========================================
+    // FIXED: Release dates back to availability system when host rejects
+    // ========================================
+    if (booking.listing && booking.checkIn && booking.checkOut) {
+      try {
+        console.log('🔄 [Host Reject] Releasing property dates back to availability system...');
+        
+        // Generate array of dates to release (normalize to midnight)
+        const startDate = new Date(booking.checkIn);
+        startDate.setHours(0, 0, 0, 0);
+        const endDate = new Date(booking.checkOut);
+        endDate.setHours(23, 59, 59, 999);
+        const datesToRelease = [];
+        
+        let currentDate = new Date(startDate);
+        while (currentDate <= endDate) {
+          const dateStr = currentDate.toISOString().split('T')[0];
+          datesToRelease.push(dateStr);
+          currentDate.setDate(currentDate.getDate() + 1);
+        }
+        
+        console.log('📅 [Host Reject] Property dates to release:', datesToRelease);
+        
+        // Update availability records - mark as available
+        const updateResult = await Availability.updateMany(
+          {
+            property: booking.listing._id || booking.listing,
+            date: { $in: datesToRelease.map(d => new Date(d)) },
+            status: { $in: ['booked', 'blocked'] }
+          },
+          {
+            $set: {
+              status: 'available',
+              bookedBy: null,
+              bookedAt: null,
+              blockedBy: null,
+              blockedAt: null,
+              reason: null
+            }
+          }
+        );
+        
+        console.log(`✅ [Host Reject] Successfully released ${updateResult.modifiedCount} property dates`);
+        
+        // Also delete any AvailabilityEvents for this booking
+        try {
+          await AvailabilityEventService.deleteBookingEvents(booking._id);
+          console.log('✅ [Host Reject] Deleted availability events for booking');
+        } catch (eventError) {
+          console.error('⚠️ Error deleting availability events:', eventError);
+        }
+        
+      } catch (availabilityError) {
+        console.error('❌ [Host Reject] Error releasing property dates:', availabilityError);
+        // Don't fail the rejection if date release fails
+      }
+    }
+    // ========================================
+    // END FIXED
+    // ========================================
+
     // Create notification for guest
     await Notification.create({
       user: booking.user._id,
@@ -2077,13 +2301,15 @@ const cancelBooking = async (req, res) => {
       try {
         console.log('🔄 Releasing property dates back to availability system...');
         
-        // Generate array of dates to release
+        // FIXED: Generate array of dates to release (normalize to midnight, include checkout date)
         const startDate = new Date(booking.checkIn);
+        startDate.setHours(0, 0, 0, 0);
         const endDate = new Date(booking.checkOut);
+        endDate.setHours(23, 59, 59, 999); // Include checkout date
         const datesToRelease = [];
         
         let currentDate = new Date(startDate);
-        while (currentDate < endDate) {
+        while (currentDate <= endDate) {  // FIXED: Use <= instead of <
           const dateStr = currentDate.toISOString().split('T')[0];
           datesToRelease.push(dateStr);
           currentDate.setDate(currentDate.getDate() + 1);
@@ -2094,15 +2320,17 @@ const cancelBooking = async (req, res) => {
                         // Update availability records to mark dates as available again
                 const updateResult = await Availability.updateMany(
                   {
-                    property: booking.listing,
-                    date: { $in: datesToRelease },
-                    status: 'booked'
+            property: booking.listing._id || booking.listing,
+            date: { $in: datesToRelease.map(d => new Date(d)) },
+            status: { $in: ['booked', 'blocked'] }  // FIXED: Also release blocked dates
                   },
                   {
                     $set: {
                       status: 'available',
                       bookedBy: null,
                       bookedAt: null,
+              blockedBy: null,
+              blockedAt: null,
                       reason: null
                     },
                     $unset: {
@@ -2111,29 +2339,19 @@ const cancelBooking = async (req, res) => {
                   }
                 );
         
-                        console.log(`✅ Successfully released ${updateResult.modifiedCount} property dates back to available status (reason field cleared)`);
+        console.log(`✅ Successfully released ${updateResult.modifiedCount} property dates back to available status`);
         
-                        // Also handle any blocked dates that might still exist
-                await Availability.updateMany(
-                  {
-                    property: booking.listing,
-                    date: { $in: datesToRelease },
-                    status: 'blocked'
-                  },
-                  {
-                    $set: {
-                      status: 'available',
-                      blockedBy: null,
-                      blockedAt: null,
-                      reason: null
-                    }
-                  }
-                );
+        // Also delete any AvailabilityEvents for this booking
+        try {
+          await AvailabilityEventService.deleteBookingEvents(booking._id);
+          console.log('✅ Deleted availability events for cancelled booking');
+        } catch (eventError) {
+          console.error('⚠️ Error deleting availability events:', eventError);
+        }
         
       } catch (availabilityError) {
         console.error('⚠️ Error releasing property dates to availability system:', availabilityError);
         // Don't fail the cancellation if availability update fails
-        // The dates will be cleaned up by the availability controller's cleanup process
       }
     }
     
