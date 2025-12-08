@@ -62,16 +62,58 @@ const rateLimiters = createRateLimiters();
 
 // CORS configuration
 const corsOptions = {
-  origin: process.env.ALLOWED_ORIGINS ? 
-    process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()).filter(url => url) : 
-    ['http://localhost:3000'], // Default fallback for local development only
+  origin: function (origin, callback) {
+    // Build list of allowed origins from environment variables
+    const allowedOrigins = [];
+    
+    // Add localhost for development
+    if (process.env.NODE_ENV !== 'production') {
+      allowedOrigins.push('http://localhost:3000');
+    }
+    
+    // Add FRONTEND_URL if set
+    if (process.env.FRONTEND_URL) {
+      allowedOrigins.push(process.env.FRONTEND_URL);
+    }
+    
+    // Add ALLOWED_ORIGINS if set (comma-separated list)
+    if (process.env.ALLOWED_ORIGINS) {
+      const additionalOrigins = process.env.ALLOWED_ORIGINS.split(',')
+        .map(url => url.trim())
+        .filter(url => url);
+      allowedOrigins.push(...additionalOrigins);
+    }
+    
+    // Allow requests with no origin (like mobile apps, Postman, or curl)
+    if (!origin) {
+      return callback(null, true);
+    }
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      // Log for debugging
+      console.log('🚫 CORS blocked origin:', origin);
+      console.log('✅ Allowed origins:', allowedOrigins);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
 };
 
 // Apply security middleware
 app.use(helmet);
+
+// CORS middleware - must be before other middleware
 app.use(cors(corsOptions));
+
+// Handle preflight requests explicitly
+app.options('*', cors(corsOptions));
+
 app.use(express.json({ limit: securityConfig.validation.maxRequestSize }));
 app.use(express.urlencoded({ extended: true, limit: securityConfig.validation.maxRequestSize }));
 
