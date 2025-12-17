@@ -16,16 +16,14 @@ const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
 if (missingEnvVars.length > 0) {
   console.error('❌ Missing required environment variables:', missingEnvVars);
-  console.error('Please check your .env file in the backend directory');
   process.exit(1);
 }
 
-const port = process.env.PORT || 5001;
+const port = process.env.PORT;
 
 console.log('🚀 Starting TripMe Backend Server...');
-console.log('Environment:', process.env.NODE_ENV);
+console.log('Environment:', process.env.NODE_ENV || 'production');
 console.log('Port:', port);
-console.log('Frontend URL:', process.env.FRONTEND_URL);
 
 // Connect to database
 connectDB();
@@ -60,26 +58,35 @@ setTimeout(async () => {
 const helmet = createHelmet();
 const rateLimiters = createRateLimiters();
 
+// Helper function to normalize URLs (remove trailing slashes, ensure protocol)
+const normalizeOrigin = (url) => {
+  if (!url) return null;
+  // Remove trailing slashes
+  let normalized = url.trim().replace(/\/+$/, '');
+  // If no protocol, assume https for production
+  if (!normalized.match(/^https?:\/\//)) {
+    normalized = `https://${normalized}`;
+  }
+  return normalized;
+};
+
 // CORS configuration
 const corsOptions = {
   origin: function (origin, callback) {
-    // Build list of allowed origins from environment variables
     const allowedOrigins = [];
     
-    // Add localhost for development
-    if (process.env.NODE_ENV !== 'production') {
-      allowedOrigins.push('http://localhost:3000');
-    }
-    
-    // Add FRONTEND_URL if set
+    // Add FRONTEND_URL if set (handle comma-separated)
     if (process.env.FRONTEND_URL) {
-      allowedOrigins.push(process.env.FRONTEND_URL);
+      const urls = process.env.FRONTEND_URL.split(',')
+        .map(url => normalizeOrigin(url))
+        .filter(url => url);
+      allowedOrigins.push(...urls);
     }
     
     // Add ALLOWED_ORIGINS if set (comma-separated list)
     if (process.env.ALLOWED_ORIGINS) {
       const additionalOrigins = process.env.ALLOWED_ORIGINS.split(',')
-        .map(url => url.trim())
+        .map(url => normalizeOrigin(url))
         .filter(url => url);
       allowedOrigins.push(...additionalOrigins);
     }
@@ -89,13 +96,19 @@ const corsOptions = {
       return callback(null, true);
     }
     
-    // Check if origin is in allowed list
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    // Normalize the incoming origin
+    const normalizedOrigin = normalizeOrigin(origin);
+    
+    // Check if origin is in allowed list (case-insensitive comparison)
+    const isAllowed = allowedOrigins.some(allowed => {
+      const normalizedAllowed = normalizeOrigin(allowed);
+      return normalizedAllowed && normalizedAllowed.toLowerCase() === normalizedOrigin.toLowerCase();
+    });
+    
+    if (isAllowed) {
       callback(null, true);
     } else {
-      // Log for debugging
       console.log('🚫 CORS blocked origin:', origin);
-      console.log('✅ Allowed origins:', allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -125,6 +138,20 @@ app.use('/api/auth', rateLimiters.login);
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
+});
+
+// Root route handler (for health checks from Render, etc.)
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'TripMe Backend API is running',
+    timestamp: new Date().toISOString(),
+    version: process.env.npm_package_version || '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      api: '/api'
+    }
+  });
 });
 
 // Health check endpoint
@@ -168,11 +195,6 @@ app.get('/api/public/platform-fee', async (req, res) => {
   }
 });
 
-// Test endpoint
-app.get('/api/test', (req, res) => {
-  res.json({ success: true, message: 'Server is working' });
-});
-
 // API Routes
 console.log('🔍 Loading auth routes...');
 app.use('/api/auth', require('./routes/auth.routes'));
@@ -198,17 +220,7 @@ app.use('/api/availability', require('./routes/availability.routes'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
 // Hourly booking routes moved to main booking routes
 
-// Health check route
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'Backend server is running!',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV,
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
-  });
-});
-
-// Note: Frontend is deployed separately on Vercel
+// Note: Frontend is deployed separately
 // No need for static file serving or catch-all routes
 
 // Error handling middleware
@@ -221,25 +233,18 @@ app.use(notFound);
 app.use(errorHandler);
 
 // Handle unhandled promise rejections
-process.on('unhandledRejection', (err, promise) => {
+process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Promise Rejection:', err);
   console.error('Stack:', err.stack);
-  // Don't exit in production, just log
-  if (process.env.NODE_ENV !== 'production') {
-    console.error('Promise:', promise);
-  }
 });
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
   console.error('Stack:', err.stack);
-  // In production, you might want to exit gracefully
-  // process.exit(1);
 });
 
 app.listen(port, '0.0.0.0', () => {
   console.log(`✅ Backend server running on port ${port}`);
-  console.log(`🌐 Server URL: http://localhost:${port}`);
-  console.log(`📊 Health check: http://localhost:${port}/health`);
+  console.log(`📊 Health check: /api/health`);
 });

@@ -50,11 +50,42 @@ const securityConfig = {
         styleSrc: ["'self'", "'unsafe-inline'"],
         scriptSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", "data:", "https:"],
-        connectSrc: [
-          "'self'",
-          ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
-          ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()).filter(url => url) : [])
-        ],
+        connectSrc: (() => {
+          const sources = ["'self'"];
+          
+          // Helper to normalize URLs for CSP (remove trailing slashes, ensure valid format)
+          const normalizeCSPUrl = (url) => {
+            if (!url || typeof url !== 'string') return null;
+            let normalized = url.trim().replace(/\/+$/, ''); // Remove trailing slashes
+            // CSP needs full URLs with protocol
+            if (!normalized.match(/^https?:\/\//)) {
+              normalized = `https://${normalized}`;
+            }
+            // Basic validation - must be a valid URL format
+            if (normalized.match(/^https?:\/\/[^\s]+$/)) {
+              return normalized;
+            }
+            return null;
+          };
+          
+          // Add FRONTEND_URL if set (handle comma-separated)
+          if (process.env.FRONTEND_URL) {
+            const urls = process.env.FRONTEND_URL.split(',')
+              .map(normalizeCSPUrl)
+              .filter(url => url);
+            sources.push(...urls);
+          }
+          
+          // Add ALLOWED_ORIGINS if set
+          if (process.env.ALLOWED_ORIGINS) {
+            const urls = process.env.ALLOWED_ORIGINS.split(',')
+              .map(normalizeCSPUrl)
+              .filter(url => url);
+            sources.push(...urls);
+          }
+          
+          return sources;
+        })(),
         fontSrc: ["'self'"],
         objectSrc: ["'none'"],
         mediaSrc: ["'self'"],
