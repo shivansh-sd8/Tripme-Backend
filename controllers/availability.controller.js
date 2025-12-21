@@ -153,10 +153,11 @@ const getPropertyAvailability = async (req, res) => {
     });
     
     // Also check for bookings that might not have Availability records for checkout dates
+    // Include 'pending' status because bookings wait for host approval but dates should still show as partially-available
     const Booking = require('../models/Booking');
     const futureBookings = await Booking.find({
       property: propertyId,
-      status: { $in: ['paid', 'confirmed'] },
+      status: { $in: ['pending', 'paid', 'confirmed'] },
       checkOut: { $gte: queryStart, $lte: queryEnd }
     }).select('checkOut checkOutTime checkIn checkInTime user').populate('user', 'name');
     
@@ -394,7 +395,7 @@ const getPropertyAvailability = async (req, res) => {
 
     // Sort by date after adding maintenance-only entries
     availabilityWithDetails.sort((a, b) => new Date(a.date) - new Date(b.date));
-    console.log('availabilityWithDetails', availabilityWithDetails);
+    // console.log('availabilityWithDetails', availabilityWithDetails);
     console.log('property.availabilitySettings?.hostBufferTime', property.availabilitySettings?.hostBufferTime);
     res.status(200).json({
       success: true,
@@ -1005,7 +1006,7 @@ const blockDates = async (req, res) => {
   try {
     const { propertyId } = req.params;
     const { dates, reason } = req.body; // Array of dates
-
+   
     // Check if user is the host of this property
     const property = await Property.findById(propertyId);
     if (!property) {
@@ -1097,7 +1098,7 @@ const blockDatesForBooking = async (req, res) => {
     const { propertyId } = req.params;
     const { dates } = req.body; // Array of dates
     const userId = req.user._id; // Get user ID from authenticated request
-
+    console.log("block date console log" , req.body);
 
 
     // Validate property exists
@@ -1163,7 +1164,7 @@ const confirmBooking = async (req, res) => {
     const { propertyId } = req.params;
     const { dates, bookingId } = req.body; // Array of dates and booking ID
     const userId = req.user._id; // Get user ID from authenticated request
-
+    console.log("confirm booking called", req.body);
 
 
     // Validate property exists

@@ -33,6 +33,10 @@ const paymentSchema = new mongoose.Schema({
     transactionId: String,
     gatewayResponse: mongoose.Schema.Types.Mixed
   },
+  // Razorpay specific fields
+  razorpayOrderId: String,
+  razorpayPaymentId: String,
+  razorpaySignature: String,
   status: {
     type: String,
     enum: ['pending', 'processing', 'completed', 'failed', 'refunded', 'partially_refunded', 'cancelled'],
@@ -287,5 +291,7 @@ paymentSchema.index({ 'payout.status': 1 });
 paymentSchema.index({ createdAt: -1 });
 paymentSchema.index({ transactionId: 1 });
 paymentSchema.index({ 'payout.scheduledDate': 1 });
+paymentSchema.index({ razorpayOrderId: 1 });
+paymentSchema.index({ razorpayPaymentId: 1 });
 
 module.exports = mongoose.model('Payment', paymentSchema);

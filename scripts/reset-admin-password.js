@@ -3,7 +3,7 @@
  * 
  * Usage: node scripts/reset-admin-password.js
  * 
- * This script will reset the password for admin1@tripme.com
+ * This script will create or reset the password for an admin user
  */
 
 const mongoose = require('mongoose');
@@ -12,12 +12,14 @@ require('dotenv').config();
 
 // Configuration
 const ADMIN_EMAIL = 'admin1@tripme.com';
-const NEW_PASSWORD = 'Admin@123'; // Change this to your desired password
+const NEW_PASSWORD = 'Admin@123456'; // Must be at least 12 characters
+const ADMIN_NAME = 'Admin User';
+const ADMIN_ROLE = 'super-admin'; // super-admin, admin, moderator, or support
 
 async function resetPassword() {
   try {
-    console.log('🔐 Password Reset Script Started');
-    console.log('================================\n');
+    console.log('🔐 Admin Password Reset Script Started');
+    console.log('=====================================\n');
 
     // Connect to MongoDB
     const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
@@ -29,63 +31,64 @@ async function resetPassword() {
     }
 
     console.log('📡 Connecting to MongoDB...');
-    await mongoose.connect(mongoUri);
+    // Ensure we use the correct database name (case-sensitive)
+    const mongoUriFixed = mongoUri.replace(/\/tripme$/, '/TripMe').replace(/\/tripme\?/, '/TripMe?');
+    await mongoose.connect(mongoUriFixed);
     console.log('✅ Connected to MongoDB\n');
 
-    // Get the users collection
-    const db = mongoose.connection.db;
-    const usersCollection = db.collection('users');
+    // Get the Admin model
+    const Admin = require('../models/Admin');
 
-    // Find the user
-    console.log(`🔍 Looking for user: ${ADMIN_EMAIL}`);
-    const user = await usersCollection.findOne({ email: ADMIN_EMAIL });
+    // Find or create the admin
+    console.log(`🔍 Looking for admin: ${ADMIN_EMAIL}`);
+    let admin = await Admin.findOne({ email: ADMIN_EMAIL });
 
-    if (!user) {
-      console.error(`❌ User not found: ${ADMIN_EMAIL}`);
-      await mongoose.disconnect();
-      process.exit(1);
-    }
+    if (!admin) {
+      console.log(`⚠️  Admin not found. Creating new admin account...`);
+      
+      // Create new admin (password will be hashed by pre-save hook)
+      admin = await Admin.create({
+        name: ADMIN_NAME,
+        email: ADMIN_EMAIL,
+        password: NEW_PASSWORD, // Will be hashed by pre-save hook
+        role: ADMIN_ROLE,
+        isActive: true
+      });
 
-    console.log(`✅ User found: ${user.name || user.email}`);
-    console.log(`   Role: ${user.role}`);
-    console.log(`   ID: ${user._id}\n`);
-
-    // Generate new password hash
-    console.log('🔒 Generating new password hash...');
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(NEW_PASSWORD, saltRounds);
-    console.log('✅ New hash generated\n');
-
-    // Update the password
-    console.log('📝 Updating password in database...');
-    const result = await usersCollection.updateOne(
-      { email: ADMIN_EMAIL },
-      { 
-        $set: { 
-          password: hashedPassword,
-          updatedAt: new Date()
-        } 
-      }
-    );
-
-    if (result.modifiedCount === 1) {
-      console.log('✅ Password updated successfully!\n');
-      console.log('================================');
-      console.log('🎉 PASSWORD RESET COMPLETE');
-      console.log('================================');
-      console.log(`📧 Email: ${ADMIN_EMAIL}`);
-      console.log(`🔑 New Password: ${NEW_PASSWORD}`);
-      console.log('================================\n');
+      console.log(`✅ Admin account created successfully!\n`);
     } else {
-      console.error('❌ Failed to update password');
+      console.log(`✅ Admin found: ${admin.name || admin.email}`);
+      console.log(`   Current Role: ${admin.role}`);
+      console.log(`   ID: ${admin._id}\n`);
+
+      // Update the password and role
+      console.log('📝 Updating password and role in database...');
+      admin.password = NEW_PASSWORD; // Will be hashed by pre-save hook
+      admin.role = ADMIN_ROLE;
+      admin.isActive = true;
+      await admin.save();
+
+      console.log('✅ Password and role updated successfully!\n');
     }
+
+    console.log('================================');
+    console.log('🎉 ADMIN PASSWORD RESET COMPLETE');
+    console.log('================================');
+    console.log(`📧 Email: ${ADMIN_EMAIL}`);
+    console.log(`👤 Name: ${admin.name}`);
+    console.log(`👑 Role: ${admin.role}`);
+    console.log(`🔑 New Password: ${NEW_PASSWORD}`);
+    console.log(`✅ isActive: ${admin.isActive}`);
+    console.log('================================\n');
+    console.log('🎉 Admin can now login to the admin portal!');
 
     // Disconnect
     await mongoose.disconnect();
-    console.log('📡 Disconnected from MongoDB');
+    console.log('\n📡 Disconnected from MongoDB');
 
   } catch (error) {
     console.error('❌ Error:', error.message);
+    console.error(error.stack);
     await mongoose.disconnect();
     process.exit(1);
   }
@@ -93,4 +96,3 @@ async function resetPassword() {
 
 // Run the script
 resetPassword();
-

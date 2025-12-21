@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const razorpayService = require('./services/razorpay.service');
 const cors = require('cors');
 const path = require('path');
 const connectDB = require('./config/db');
@@ -24,7 +25,12 @@ const port = process.env.PORT;
 console.log('🚀 Starting TripMe Backend Server...');
 console.log('Environment:', process.env.NODE_ENV || 'production');
 console.log('Port:', port);
+// console.log('Frontend URL:', process.env.FRONTEND_URL);
 
+console.log(
+  'Razorpay ready at boot?',
+  razorpayService.isInitialized()
+);
 // Connect to database
 connectDB();
 
@@ -122,10 +128,8 @@ const corsOptions = {
 app.use(helmet);
 
 // CORS middleware - must be before other middleware
+// This already handles all OPTIONS preflight requests automatically
 app.use(cors(corsOptions));
-
-// Handle preflight requests explicitly
-app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: securityConfig.validation.maxRequestSize }));
 app.use(express.urlencoded({ extended: true, limit: securityConfig.validation.maxRequestSize }));
@@ -193,6 +197,11 @@ app.get('/api/public/platform-fee', async (req, res) => {
       message: 'Failed to fetch platform fee rate'
     });
   }
+});
+
+// Test endpoint
+app.get('/api/test', (req, res) => {
+  res.json({ success: true, message: 'Server is working' });
 });
 
 // API Routes

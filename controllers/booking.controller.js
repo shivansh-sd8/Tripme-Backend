@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Payment = require('../models/Payment');
 const Coupon = require('../models/Coupon');
 const Availability = require('../models/Availability');
+const razorpayService = require('../services/razorpay.service');
 const { calculatePricingBreakdown, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking, calculateHourlyExtension, toTwoDecimals } = require('../utils/pricingUtils');
 const { calculateExtendedCheckout, getAdditionalDatesForExtension } = require('../config/pricing.config');
 const AvailabilityService = require('../services/availability.service');
@@ -19,7 +20,6 @@ const Notification = require('../models/Notification');
 const RefundService = require('../services/refundService');
 const { 
   sendBookingConfirmationEmail, 
-  sendNewBookingNotificationEmail, 
   sendBookingCancellationEmail,
   sendHostCancelledBookingEmail,
   sendHostConfirmedBookingEmail,
@@ -30,11 +30,47 @@ const {
 const { generateReceipt, generateReceiptHTML } = require('../utils/generateReceipt');
 const { PRICING_CONFIG } = require('../config/pricing.config');
 
+// Helper function to map Refund model status to Booking model refundStatus enum
+// Refund model: ['pending', 'approved', 'processing', 'completed', 'failed', 'rejected', 'cancelled']
+// Booking model: ['pending', 'processed', 'completed', 'not_applicable']
+const mapRefundStatusToBooking = (refundStatus) => {
+  if (!refundStatus) return 'not_applicable';
+  
+  const statusMap = {
+    'pending': 'pending',
+    'approved': 'pending', // Approved but not yet processed
+    'processing': 'processed', // Currently being processed
+    'completed': 'completed',
+    'failed': 'pending', // Failed, keep as pending for retry
+    'rejected': 'pending', // Rejected, keep as pending
+    'cancelled': 'not_applicable' // Cancelled refund
+  };
+  
+  return statusMap[refundStatus] || 'pending';
+};
+
+
+
+function normalizeToLocalMidnight(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function formatLocalDate(date) {
+  return date.toLocaleDateString('en-CA'); // YYYY-MM-DD
+
+}
 // @desc    Process payment and create booking (new flow)
 // @route   POST /api/bookings/process-payment
 // @access  Private
 const processPaymentAndCreateBooking = async (req, res) => {
   try {
+    console.log('🚀 ===========================================');
+    console.log('🚀 processPaymentAndCreateBooking called');
+    console.log('🚀 Request body:', JSON.stringify(req.body, null, 2));
+    console.log('🚀 ===========================================');
+    
     const {
       propertyId,
       listingId,
@@ -64,6 +100,9 @@ const processPaymentAndCreateBooking = async (req, res) => {
     console.log('   hourlyExtension:', hourlyExtension);
     console.log('   checkIn:', checkIn);
     console.log('   checkOut:', checkOut);
+    console.log('   propertyId:', propertyId);
+    console.log('   guests:', guests);
+    console.log('   paymentData:', paymentData ? 'Present' : 'Missing');
     
     // Generate idempotency key if not provided
     const finalIdempotencyKey = idempotencyKey || require('crypto').randomUUID();
@@ -130,6 +169,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
     }
     
     // Security validation for booking parameters
+    console.log('🔍 Validating booking parameters...');
     const bookingValidation = require('../utils/paymentSecurity').validateBookingParameters({
       checkIn: checkIn,
       checkOut: checkOut,
@@ -139,15 +179,18 @@ const processPaymentAndCreateBooking = async (req, res) => {
     });
     
     if (!bookingValidation.isValid) {
+      console.error('❌ Booking validation failed:', bookingValidation.errors);
       return res.status(400).json({ 
         success: false, 
         message: 'Invalid booking parameters',
         errors: bookingValidation.errors
       });
     }
+    console.log('✅ Booking parameters validated');
     
-    // Verify payment amount if provided
-    if (paymentData) {
+    // Verify payment amount if provided (skip for Razorpay - we verify signature instead)
+    if (paymentData && !paymentData.razorpayOrderId) {
+      // Only verify amount for non-Razorpay payments
       const amountVerification = require('../utils/paymentSecurity').verifyPaymentAmount(paymentData, {
         basePrice: listing?.pricing?.basePrice || service?.pricing?.basePrice || 0,
         nights: bookingType === 'property' ? 
@@ -171,6 +214,9 @@ const processPaymentAndCreateBooking = async (req, res) => {
           actualAmount: amountVerification.actualAmount
         });
       }
+    } else if (paymentData && paymentData.razorpayOrderId) {
+      // For Razorpay, we verify signature instead of amount (amount verification happens via Razorpay API)
+      console.log('✅ Skipping amount verification for Razorpay payment - signature verification will be done');
     }
 
     // Determine if this is a 24-hour booking
@@ -471,6 +517,48 @@ const processPaymentAndCreateBooking = async (req, res) => {
     });
 
     // Step 2: Create payment with booking reference
+    // Verify Razorpay payment if payment data is provided
+    let razorpayOrderId = null;
+    let razorpayPaymentId = null;
+    let razorpaySignature = null;
+    let isPaymentVerified = false;
+    console.log("payment data",  paymentData.razorpayOrderId ,paymentData.razorpayPaymentId ,paymentData.razorpaySignature);
+    if (paymentData && paymentData.razorpayOrderId && paymentData.razorpayPaymentId && paymentData.razorpaySignature) {
+      // Verify payment signature
+      isPaymentVerified = razorpayService.verifyPayment(
+        paymentData.razorpayOrderId,
+        paymentData.razorpayPaymentId,
+        paymentData.razorpaySignature
+  //       razorpay_order_id,
+  // razorpay_payment_id,
+  // razorpay_signature
+      );
+
+      if (!isPaymentVerified) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid payment signature. Payment verification failed.'
+        });
+      }
+
+      razorpayOrderId = paymentData.razorpayOrderId;
+      razorpayPaymentId = paymentData.razorpayPaymentId;
+      razorpaySignature = paymentData.razorpaySignature;
+
+      // Get payment details from Razorpay
+      try {
+        const razorpayPaymentDetails = await razorpayService.getPaymentDetails(razorpayPaymentId);
+        console.log('✅ Razorpay payment verified:', razorpayPaymentDetails);
+      } catch (razorpayError) {
+        console.error('❌ Error fetching Razorpay payment details:', razorpayError);
+        return res.status(400).json({
+          success: false,
+          message: 'Failed to verify payment with Razorpay',
+          error: razorpayError.message
+        });
+      }
+    }
+
     // Map frontend payment method to backend payment method
     const paymentMethodMap = {
       'card': 'credit_card',
@@ -482,7 +570,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
     const mappedPaymentMethod = paymentMethodMap[paymentMethod] || 'credit_card';
     
     // Generate transaction ID and invoice ID
-    const transactionId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const transactionId = razorpayPaymentId || `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const invoiceId = `INV_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const receiptId = `RCP_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -497,14 +585,18 @@ const processPaymentAndCreateBooking = async (req, res) => {
       // Payment details with transaction information
       paymentDetails: {
         transactionId: transactionId,
-        paymentGateway: 'mock_gateway', // TODO: Replace with actual gateway
-        gatewayResponse: {
+        paymentGateway: 'razorpay',
+        gatewayResponse: paymentData?.razorpayPaymentDetails || {
           status: 'success',
           transactionId: transactionId,
           processedAt: new Date().toISOString(),
-          gateway: 'mock_gateway'
+          gateway: 'razorpay'
         }
       },
+      // Razorpay specific fields
+      razorpayOrderId: razorpayOrderId,
+      razorpayPaymentId: razorpayPaymentId,
+      razorpaySignature: razorpaySignature,
       
       // Fee breakdown
       subtotal: subtotal,
@@ -598,37 +690,57 @@ const processPaymentAndCreateBooking = async (req, res) => {
           console.log(`✅ Successfully blocked 24-hour time slot: ${bookingCheckInDateTime.toISOString()} to ${bookingCheckOutDateTime.toISOString()}`);
         } else if (checkIn && finalCheckOut) {
           // Block date-based availability for regular booking
-          console.log('🔒 Blocking property dates for booking...');
+          // console.log('🔒 Blocking property dates for booking...');
+          // ////////////////////////////////////////////////////////////////////////
+          // // Generate array of dates to block
+          // // FIXED: Use UTC date extraction to avoid timezone issues
+          // // Extract YYYY-MM-DD directly from ISO strings to avoid timezone shifts
+          // const checkInDate = new Date(checkIn);
+          // const checkOutDate = new Date(finalCheckOut);
           
-          // Generate array of dates to block
-          // FIXED: Use UTC date extraction to avoid timezone issues
-          // Extract YYYY-MM-DD directly from ISO strings to avoid timezone shifts
-          const checkInDate = new Date(checkIn);
-          const checkOutDate = new Date(finalCheckOut);
+          // // Get date strings in YYYY-MM-DD format (UTC)
+          // const startDateStr = checkInDate.toISOString().split('T')[0];
+          // const endDateStr = checkOutDate.toISOString().split('T')[0];
           
-          // Get date strings in YYYY-MM-DD format (UTC)
-          const startDateStr = checkInDate.toISOString().split('T')[0];
-          const endDateStr = checkOutDate.toISOString().split('T')[0];
+          // const datesToBlock = [];
           
+          // console.log('📅 Date blocking calculation:', {
+          //   checkIn: checkIn,
+          //   finalCheckOut: finalCheckOut,
+          //   startDateStr: startDateStr,
+          //   endDateStr: endDateStr,
+          //   hourlyExtension: hourlyExtension?.hours || 'none'
+          // });
+          
+          // // Generate all dates from check-in to check-out (inclusive)
+          // let currentDate = new Date(startDateStr + 'T00:00:00.000Z');
+          // const endDateForLoop = new Date(endDateStr + 'T00:00:00.000Z');
+          
+          // while (currentDate <= endDateForLoop) {
+          //   const dateStr = currentDate.toISOString().split('T')[0];
+          //   datesToBlock.push(dateStr);
+          //   console.log(`  → Adding date to block: ${dateStr}`);
+          //   currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+          // }
+          const start = normalizeToLocalMidnight(checkIn);
+          const end = normalizeToLocalMidnight(checkOut); // ❗ use checkOut, NOT finalCheckOut
+
           const datesToBlock = [];
-          
-          console.log('📅 Date blocking calculation:', {
-            checkIn: checkIn,
-            finalCheckOut: finalCheckOut,
-            startDateStr: startDateStr,
-            endDateStr: endDateStr,
-            hourlyExtension: hourlyExtension?.hours || 'none'
-          });
-          
-          // Generate all dates from check-in to check-out (inclusive)
-          let currentDate = new Date(startDateStr + 'T00:00:00.000Z');
-          const endDateForLoop = new Date(endDateStr + 'T00:00:00.000Z');
-          
-          while (currentDate <= endDateForLoop) {
-            const dateStr = currentDate.toISOString().split('T')[0];
+          const current = new Date(start);
+          //  console.log('📅 Date blocking calculation:', {
+          //   checkIn: checkIn,
+          //   finalCheckOut: finalCheckOut,
+          //   checkOut :checkOut,
+          //   startDateStr: startDateStr,
+          //   endDateStr: endDateStr,
+          //   hourlyExtension: hourlyExtension?.hours || 'none'
+          // });
+
+          while (current < end) { // ❗ NOT <=
+            const dateStr = formatLocalDate(current);
             datesToBlock.push(dateStr);
             console.log(`  → Adding date to block: ${dateStr}`);
-            currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+            current.setDate(current.getDate() + 1);
           }
           
           // Add additional dates for hourly extensions if they extend to next day
@@ -669,6 +781,42 @@ const processPaymentAndCreateBooking = async (req, res) => {
           }
           
           console.log(`✅ Successfully blocked ${datesToBlock.length} property dates for booking`);
+          
+          // ========================================
+          // Mark checkout date as "partially-available"
+          // The checkout date should be available for new bookings after checkout time + maintenance
+          // ========================================
+          const checkoutDateStr = formatLocalDate(normalizeToLocalMidnight(checkOut));
+          const maintenanceHrs = listing?.availabilitySettings?.hostBufferTime || 2;
+          
+          // Parse checkout time to calculate when property becomes available
+          const [checkoutHour, checkoutMinute] = (finalCheckOutTime || '11:00').split(':').map(Number);
+          const checkoutDateTime = new Date(checkOut);
+          checkoutDateTime.setHours(checkoutHour, checkoutMinute, 0, 0);
+          
+          // Calculate maintenance end time (when property becomes available)
+          const maintenanceEndTime = new Date(checkoutDateTime.getTime() + maintenanceHrs * 60 * 60 * 1000);
+          
+          console.log(`📅 Marking checkout date ${checkoutDateStr} as partially-available`);
+          console.log(`   Checkout time: ${finalCheckOutTime}, Maintenance ends: ${maintenanceEndTime.toISOString()}`);
+          
+          await Availability.findOneAndUpdate(
+            {
+              property: actualListingId,
+              date: new Date(checkoutDateStr)
+            },
+            {
+              property: actualListingId,
+              date: new Date(checkoutDateStr),
+              status: 'partially-available',
+              reason: `Available after ${maintenanceEndTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`,
+              bookedBy: booking._id,
+              bookedAt: new Date()
+            },
+            { upsert: true, new: true }
+          );
+          
+          console.log(`✅ Checkout date ${checkoutDateStr} marked as partially-available`);
         }
         
         // ========================================
@@ -725,28 +873,47 @@ const processPaymentAndCreateBooking = async (req, res) => {
       try {
         console.log('🔄 Updating availability status from "blocked" to "booked"...');
         
-        // Recalculate date strings (same logic as blocking section)
-        const checkInDate = new Date(checkIn);
-        const checkOutDate = new Date(finalCheckOut);
-        const startDateStr = checkInDate.toISOString().split('T')[0];
-        const endDateStr = checkOutDate.toISOString().split('T')[0];
-        
-        // Get all dates that were blocked for this booking
-        const datesToUpdate = [];
-        let currentDate = new Date(startDateStr + 'T00:00:00.000Z');
-        const endDateForLoop = new Date(endDateStr + 'T00:00:00.000Z');
-        
-        while (currentDate <= endDateForLoop) {
-          const dateStr = currentDate.toISOString().split('T')[0];
-          datesToUpdate.push(new Date(dateStr));
-          currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+        // Use the EXACT SAME logic as blocking section to ensure date format matches
+        const updateStart = normalizeToLocalMidnight(checkIn);
+        const updateEnd = normalizeToLocalMidnight(checkOut); // Use checkOut, same as blocking
+
+        const dateStringsToUpdate = [];
+        const updateCurrent = new Date(updateStart);
+
+        while (updateCurrent < updateEnd) {
+          const dateStr = formatLocalDate(updateCurrent); // Use formatLocalDate to match blocking format
+          dateStringsToUpdate.push(dateStr); // Store as strings first
+          updateCurrent.setDate(updateCurrent.getDate() + 1);
         }
+        
+        // Add additional dates for hourly extensions if they extend to next day (same as blocking)
+        if (hourlyExtension && hourlyExtension.hours) {
+          const additionalDates = getAdditionalDatesForExtension(
+            checkOut, 
+            hourlyExtension.hours, 
+            finalCheckOutTime
+          );
+          
+          additionalDates.forEach(date => {
+            const dateStr = date.toISOString().split('T')[0];
+            if (!dateStringsToUpdate.includes(dateStr)) {
+              dateStringsToUpdate.push(dateStr);
+            }
+          });
+        }
+        
+        console.log(`📅 Date strings to update to booked:`, dateStringsToUpdate);
+        
+        // Convert date strings to Date objects the SAME WAY as blocking: new Date(dateStr)
+        const datesToUpdateAsDateObjects = dateStringsToUpdate.map(dateStr => new Date(dateStr));
+        
+        console.log(`📅 Date objects to update:`, datesToUpdateAsDateObjects.map(d => d.toISOString()));
         
         // Update all blocked dates to booked
         const updateResult = await Availability.updateMany(
           {
             property: actualListingId,
-            date: { $in: datesToUpdate },
+            date: { $in: datesToUpdateAsDateObjects },
             status: 'blocked'
           },
           {
@@ -763,7 +930,53 @@ const processPaymentAndCreateBooking = async (req, res) => {
           }
         );
         
-        console.log(`✅ Successfully updated ${updateResult.modifiedCount} dates from "blocked" to "booked"`);
+        console.log(`✅ Successfully matched ${updateResult.matchedCount}, updated ${updateResult.modifiedCount} dates from "blocked" to "booked"`);
+        
+        // Debug: If no dates were updated, log what's actually in the database
+        if (updateResult.modifiedCount === 0) {
+          console.log('⚠️ No dates were updated. Checking database for blocked dates...');
+          
+          const allBlockedDates = await Availability.find({
+            property: actualListingId,
+            status: 'blocked'
+          }).select('date status').lean();
+          
+          console.log(`📊 Found ${allBlockedDates.length} blocked dates in DB:`, 
+            allBlockedDates.map(a => ({ 
+              date: a.date.toISOString(), 
+              status: a.status 
+            })));
+          
+          console.log(`📊 Date objects we're querying:`, 
+            datesToUpdateAsDateObjects.map(d => d.toISOString()));
+          
+          // Try alternative query using $expr with date string comparison
+          const alternativeResult = await Availability.updateMany(
+            {
+              property: actualListingId,
+              $expr: {
+                $in: [
+                  { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
+                  dateStringsToUpdate
+                ]
+              },
+              status: 'blocked'
+            },
+            {
+              $set: {
+                status: 'booked',
+                reason: 'Confirmed booking',
+                bookedBy: booking._id,
+                bookedAt: new Date()
+              },
+              $unset: {
+                blockedBy: 1,
+                blockedAt: 1
+              }
+            }
+          );
+          console.log(`🔄 Alternative $expr query updated ${alternativeResult.modifiedCount} dates`);
+        }
       } catch (updateError) {
         console.error('⚠️ Error updating availability status to booked:', updateError);
         // Don't fail the booking if status update fails
@@ -817,7 +1030,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
       });
 
       // Send notification email to host
-      await sendNewBookingNotificationEmail(host.email, host.name, {
+      await sendBookingConfirmationEmail(host.email, host.name, {
         bookingId: booking._id,
         guestName: req.user.name,
         propertyName: listing?.title || service?.title,
@@ -873,7 +1086,22 @@ const processPaymentAndCreateBooking = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error in processPaymentAndCreateBooking:', error);
+    console.error('❌ ===========================================');
+    console.error('❌ Error in processPaymentAndCreateBooking:', error);
+    console.error('❌ Error message:', error.message);
+    console.error('❌ Error stack:', error.stack);
+    console.error('❌ Error details:', JSON.stringify(error, null, 2));
+    console.error('❌ ===========================================');
+    
+    // If it's a validation error, return 400 instead of 500
+    if (error.name === 'ValidationError' || error.status === 400) {
+      return res.status(400).json({
+        success: false,
+        message: error.message || 'Validation error',
+        errors: error.errors || [error.message]
+      });
+    }
+    
     res.status(500).json({
       success: false,
       message: 'Failed to process payment and create booking',
@@ -1144,7 +1372,7 @@ const createBooking = async (req, res) => {
         specialRequests: specialRequests || null
       };
 
-      await sendNewBookingNotificationEmail(host.email, host.name, bookingDetails);
+      await sendBookingConfirmationEmail(host.email, host.name, bookingDetails);
     } catch (emailError) {
       console.error('Error sending email notification:', emailError);
       // Don't fail the booking if email fails
@@ -1253,7 +1481,7 @@ const getHostBookings = async (req, res) => {
     const bookings = await Booking.find(query)
       .populate('listing', 'title images location pricing')
       .populate('service', 'title media pricing')
-      .populate('user', 'name profileImage')
+      .populate('user', 'name email phone profileImage')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -1555,6 +1783,18 @@ const rejectBooking = async (req, res) => {
 
     // Process full refund since booking was cancelled before host approval
     try {
+      console.log('🔄 ===========================================');
+      console.log('🔄 HOST CANCELLATION - REFUND PROCESSING');
+      console.log('🔄 ===========================================');
+      console.log('📋 Booking ID:', booking._id);
+      console.log('👤 Guest:', booking.user?.name || booking.user?.email || 'Unknown');
+      console.log('🏠 Host:', booking.host?.name || booking.host?.email || 'Unknown');
+      console.log('💰 Booking Amount:', booking.totalAmount, booking.currency || 'INR');
+      console.log('📅 Booking Status:', booking.status);
+      console.log('💳 Payment ID:', booking.payment?._id);
+      console.log('💳 Razorpay Payment ID:', booking.payment?.razorpayPaymentId || 'N/A');
+      console.log('🔄 ===========================================');
+      
       const refund = await RefundService.processRefund(
         booking._id,
         'host_cancel',
@@ -1565,13 +1805,20 @@ const rejectBooking = async (req, res) => {
         }
       );
       
-      console.log(`✅ Full refund processed for rejected booking: ${refund.refundReference}`);
-      console.log(`📋 Refund stored in database with ID: ${refund._id}`);
+      console.log('✅ ===========================================');
+      console.log('✅ REFUND PROCESSED SUCCESSFULLY');
+      console.log('✅ ===========================================');
+      console.log('📋 Refund ID:', refund._id);
+      console.log('📋 Refund Reference:', refund.refundReference);
+      console.log('💰 Refund Amount:', refund.amount, refund.currency);
+      console.log('💳 Razorpay Refund ID:', refund.razorpayRefundId || 'N/A');
+      console.log('📊 Refund Status:', refund.status);
+      console.log('✅ ===========================================');
       
       // Update booking with refund details from RefundService
       booking.refundAmount = refund.amount;
       booking.refunded = refund.amount > 0;
-      booking.refundStatus = refund.status;
+      booking.refundStatus = mapRefundStatusToBooking(refund.status);
       booking.paymentStatus = 'refunded';
     } catch (refundError) {
       console.error('❌ Error processing refund for rejected booking:', refundError);
@@ -1657,8 +1904,9 @@ const rejectBooking = async (req, res) => {
       }
     });
 
-    // Send rejection email to guest
+    // Send rejection email to guest (non-blocking - refund already processed)
     try {
+      console.log('📧 Sending cancellation email to guest...');
       await sendHostCancelledBookingEmail(booking.user.email, {
         bookingId: booking._id,
         propertyName: booking.listing?.title || booking.service?.title,
@@ -1671,8 +1919,16 @@ const rejectBooking = async (req, res) => {
         hostMessage: message,
         refundAmount: booking.refundAmount
       });
+      console.log('✅ Cancellation email sent successfully');
     } catch (emailError) {
-      console.error('Email sending failed:', emailError);
+      console.error('⚠️ ===========================================');
+      console.error('⚠️ EMAIL SENDING FAILED (Non-blocking)');
+      console.error('⚠️ ===========================================');
+      console.error('⚠️ Note: Refund has already been processed successfully');
+      console.error('⚠️ Email error does not affect refund processing');
+      console.error('⚠️ Error:', emailError.message);
+      console.error('⚠️ ===========================================');
+      // Email failure doesn't affect the refund - it's already processed
     }
 
     res.json({
@@ -1696,24 +1952,60 @@ const rejectBooking = async (req, res) => {
 // @access  Private
 const updateBookingStatus = async (req, res) => {
   try {
+    console.log('🔄 ===========================================');
+    console.log('🔄 updateBookingStatus called');
+    console.log('🔄 ===========================================');
+    console.log('📋 Booking ID:', req.params.id);
+    console.log('📝 New Status:', req.body.status);
+    console.log('📝 Reason:', req.body.reason || 'N/A');
+    console.log('👤 User ID:', req.user._id);
+    console.log('👤 User Role:', req.user.role);
+    console.log('🔄 ===========================================');
+    
     const { id } = req.params;
     const { status, reason } = req.body;
 
-    const booking = await Booking.findById(id);
+    const booking = await Booking.findById(id)
+      .populate('user', 'name email')
+      .populate('host', 'name email')
+      .populate('payment');
 
     if (!booking) {
+      console.error('❌ Booking not found:', id);
       return res.status(404).json({
         success: false,
         message: 'Booking not found'
       });
     }
 
-    // Check authorization
-    const isHost = booking.host.toString() === req.user._id.toString();
-    const isGuest = booking.user.toString() === req.user._id.toString();
-    const isAdmin = req.user.role === 'admin';
+    console.log('✅ Booking found:', booking._id);
+    console.log('📅 Current Status:', booking.status);
+    console.log('👤 Guest:', booking.user?.name || booking.user?.email || 'Unknown');
+    console.log('🏠 Host:', booking.host?.name || booking.host?.email || 'Unknown');
+    console.log('🔍 Debug - booking.host:', booking.host);
+    console.log('🔍 Debug - booking.host._id:', booking.host?._id);
+    console.log('🔍 Debug - booking.host (raw):', JSON.stringify(booking.host));
+    console.log('🔍 Debug - req.user._id:', req.user._id);
+
+    // Check authorization - handle both populated and non-populated cases
+    const hostId = booking.host?._id ? booking.host._id.toString() : booking.host?.toString();
+    const userId = booking.user?._id ? booking.user._id.toString() : booking.user?.toString();
+    const currentUserId = req.user._id.toString();
+    
+    const isHost = hostId === currentUserId;
+    const isGuest = userId === currentUserId;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super-admin';
+
+    console.log('🔐 Authorization check:');
+    console.log('   hostId:', hostId);
+    console.log('   userId:', userId);
+    console.log('   currentUserId:', currentUserId);
+    console.log('   isHost:', isHost);
+    console.log('   isGuest:', isGuest);
+    console.log('   isAdmin:', isAdmin);
 
     if (!isHost && !isGuest && !isAdmin) {
+      console.error('❌ Not authorized to update booking');
       return res.status(403).json({
         success: false,
         message: 'Not authorized to update this booking'
@@ -1798,6 +2090,54 @@ const updateBookingStatus = async (req, res) => {
 
       booking.refundAmount = refundAmount;
       booking.paymentStatus = refundAmount > 0 ? 'partially_refunded' : 'paid';
+      
+      // IMPORTANT: If host is cancelling, process refund through Razorpay
+      if (isHost && status === 'cancelled') {
+        console.log('🔄 ===========================================');
+        console.log('🔄 HOST CANCELLATION DETECTED IN updateBookingStatus');
+        console.log('🔄 Processing refund through RefundService...');
+        console.log('🔄 ===========================================');
+        
+        try {
+          const refund = await RefundService.processRefund(
+            booking._id,
+            'host_cancel',
+            'full',
+            {
+              userNotes: reason || 'Cancelled by host via status update',
+              adminNotes: `Host cancelled booking via status update - ${reason || 'No reason provided'}`
+            }
+          );
+          
+          console.log('✅ ===========================================');
+          console.log('✅ REFUND PROCESSED SUCCESSFULLY');
+          console.log('✅ ===========================================');
+          console.log('📋 Refund ID:', refund._id);
+          console.log('📋 Refund Reference:', refund.refundReference);
+          console.log('💰 Refund Amount:', refund.amount, refund.currency);
+          console.log('💳 Razorpay Refund ID:', refund.razorpayRefundId || 'N/A');
+          console.log('📊 Refund Status:', refund.status);
+          console.log('✅ ===========================================');
+          
+          // Update booking with refund details
+          booking.refundAmount = refund.amount;
+          booking.refunded = refund.amount > 0;
+          booking.refundStatus = mapRefundStatusToBooking(refund.status);
+          booking.paymentStatus = refund.amount === booking.totalAmount ? 'refunded' : 'partially_refunded';
+          
+          console.log('📊 Refund status mapping:');
+          console.log('   Refund status:', refund.status);
+          console.log('   Booking refundStatus:', booking.refundStatus);
+        } catch (refundError) {
+          console.error('❌ ===========================================');
+          console.error('❌ REFUND PROCESSING FAILED');
+          console.error('❌ ===========================================');
+          console.error('❌ Error:', refundError.message);
+          console.error('❌ Stack:', refundError.stack);
+          console.error('❌ ===========================================');
+          // Continue with cancellation even if refund fails
+        }
+      }
     }
 
     booking.status = status;
@@ -1808,6 +2148,7 @@ const updateBookingStatus = async (req, res) => {
     }
 
     await booking.save();
+    console.log('✅ Booking status updated to:', status);
 
     // Create notification
     const notificationUser = isHost ? booking.user : booking.host;
@@ -2256,6 +2597,20 @@ const cancelBooking = async (req, res) => {
     // Process refund using RefundService BEFORE updating booking status
     let refund = null;
     try {
+      if (isHost) {
+        console.log('🔄 ===========================================');
+        console.log('🔄 HOST CANCELLATION - REFUND PROCESSING');
+        console.log('🔄 ===========================================');
+        console.log('📋 Booking ID:', booking._id);
+        console.log('👤 Guest:', booking.user?.name || booking.user?.email || 'Unknown');
+        console.log('🏠 Host:', booking.host?.name || booking.host?.email || 'Unknown');
+        console.log('💰 Booking Amount:', booking.totalAmount, booking.currency || 'INR');
+        console.log('📅 Booking Status:', booking.status);
+        console.log('💳 Payment ID:', booking.payment?._id);
+        console.log('💳 Razorpay Payment ID:', booking.payment?.razorpayPaymentId || 'N/A');
+        console.log('🔄 ===========================================');
+      }
+      
       refund = await RefundService.processRefund(
         booking._id,
         refundReason,
@@ -2266,9 +2621,21 @@ const cancelBooking = async (req, res) => {
         }
       );
       
+      if (isHost) {
+        console.log('✅ ===========================================');
+        console.log('✅ REFUND PROCESSED SUCCESSFULLY');
+        console.log('✅ ===========================================');
+        console.log('📋 Refund ID:', refund._id);
+        console.log('📋 Refund Reference:', refund.refundReference);
+        console.log('💰 Refund Amount:', refund.amount, refund.currency);
+        console.log('💳 Razorpay Refund ID:', refund.razorpayRefundId || 'N/A');
+        console.log('📊 Refund Status:', refund.status);
+        console.log('✅ ===========================================');
+      } else {
       console.log(`✅ Refund processed for cancelled booking: ${refund.refundReference}`);
       console.log(`📋 Refund stored in database with ID: ${refund._id}`);
       console.log(`💰 Refund amount: ${refund.amount}`);
+      }
     } catch (refundError) {
       console.error('❌ Error processing refund for cancelled booking:', refundError);
       // Continue with cancellation even if refund fails
@@ -2284,7 +2651,7 @@ const cancelBooking = async (req, res) => {
     if (refund) {
       booking.refundAmount = refund.amount;
       booking.refunded = refund.amount > 0;
-      booking.refundStatus = refund.status;
+      booking.refundStatus = mapRefundStatusToBooking(refund.status);
       booking.paymentStatus = refund.amount === booking.totalAmount ? 'refunded' : 'partially_refunded';
     } else {
       // Fallback if refund creation failed
@@ -2434,7 +2801,13 @@ const cancelBooking = async (req, res) => {
           );
         }
       } catch (emailError) {
-        console.error('Error sending cancellation email:', emailError);
+        console.error('⚠️ ===========================================');
+        console.error('⚠️ EMAIL SENDING FAILED (Non-blocking)');
+        console.error('⚠️ ===========================================');
+        console.error('⚠️ Note: Refund has already been processed successfully');
+        console.error('⚠️ Email error does not affect refund processing');
+        console.error('⚠️ Error:', emailError.message);
+        console.error('⚠️ ===========================================');
       }
     }
 
@@ -3106,67 +3479,67 @@ const cleanupExpiredBlockedBookings = async () => {
       console.log('📋 PENDING BOOKING INFORMATION (NOT CLEANED UP):');
       console.log('==============================================');
       
-      pendingBookings.forEach((booking, index) => {
-        console.log(`\n📝 Pending Booking #${index + 1} (PROTECTED):`);
-        console.log(`   🆔 Booking ID: ${booking._id}`);
-        console.log(`   👤 User ID: ${booking.user?._id || booking.user}`);
-        console.log(`   👤 User Name: ${booking.user?.name || 'N/A'}`);
-        console.log(`   👤 User Email: ${booking.user?.email || 'N/A'}`);
-        console.log(`   🏠 Host ID: ${booking.host?._id || booking.host}`);
-        console.log(`   🏠 Host Name: ${booking.host?.name || 'N/A'}`);
-        console.log(`   🏠 Host Email: ${booking.host?.email || 'N/A'}`);
-        console.log(`   📊 Status: ${booking.status} (PROTECTED - waiting for host approval)`);
-        console.log(`   💰 Total Amount: ₹${booking.totalAmount}`);
-        console.log(`   📅 Created At: ${booking.createdAt.toISOString()}`);
-        console.log(`   ⏰ Age: ${Math.round((now - booking.createdAt) / 1000 / 60)} minutes`);
-        console.log(`   🏠 Property: ${booking.listing || 'N/A'}`);
-        console.log(`   🎯 Service: ${booking.service || 'N/A'}`);
-        console.log(`   📝 Payment Status: ${booking.paymentStatus || 'N/A'}`);
-        console.log(`   🔄 Booking Type: ${booking.bookingType || 'N/A'}`);
-        console.log(`   📅 Check-in: ${booking.checkIn || 'N/A'}`);
-        console.log(`   📅 Check-out: ${booking.checkOut || 'N/A'}`);
-        console.log(`   ⏰ Time Slot: ${booking.timeSlot ? JSON.stringify(booking.timeSlot) : 'N/A'}`);
-        console.log(`   📝 Special Requests: ${booking.specialRequests || 'N/A'}`);
-        console.log(`   👥 Guest Details: ${booking.guestDetails ? JSON.stringify(booking.guestDetails) : 'N/A'}`);
-        console.log(`   🎫 Coupon: ${booking.couponCode || 'N/A'}`);
-        console.log(`   💳 Payment ID: ${booking.payment || 'N/A'}`);
-        console.log(`   🔄 Refund Status: ${booking.refundStatus || 'N/A'}`);
-        console.log(`   🔄 Refund Amount: ₹${booking.refundAmount || 0}`);
-        console.log(`   📝 Cancellation Reason: ${booking.cancellationReason || 'N/A'}`);
-        console.log(`   📅 Cancelled At: ${booking.cancelledAt || 'N/A'}`);
-        console.log(`   ✅ Checked In: ${booking.checkedIn || false}`);
-        console.log(`   ✅ Checked Out: ${booking.checkedOut || false}`);
-        console.log(`   📊 Pricing Breakdown: ${booking.pricingBreakdown ? 'Present' : 'Missing'}`);
-        console.log(`   📊 Subtotal: ₹${booking.subtotal || 0}`);
-        console.log(`   📊 Tax Amount: ₹${booking.taxAmount || 0}`);
-        console.log(`   📊 Platform Fee: ₹${booking.platformFee || 0}`);
-        console.log(`   📊 Processing Fee: ₹${booking.processingFee || 0}`);
-        console.log(`   📊 GST: ₹${booking.gst || 0}`);
-        console.log(`   📊 Host Fee: ₹${booking.hostFee || 0}`);
-        console.log(`   📊 Discount Amount: ₹${booking.discountAmount || 0}`);
-        console.log(`   📊 Host Earning: ₹${booking.hostEarning || 0}`);
-        console.log(`   📊 Cleaning Fee: ₹${booking.cleaningFee || 0}`);
-        console.log(`   📊 Service Fee: ₹${booking.serviceFee || 0}`);
-        console.log(`   📊 Security Deposit: ₹${booking.securityDeposit || 0}`);
-        console.log(`   📊 Hourly Extension: ₹${booking.hourlyExtension || 0}`);
-        console.log(`   📊 Currency: ${booking.currency || 'INR'}`);
-        console.log(`   📊 Cancellation Policy: ${booking.cancellationPolicy || 'N/A'}`);
-        console.log(`   📊 Booking Reference: ${booking.bookingReference || 'N/A'}`);
-        console.log(`   📊 Notes: ${booking.notes || 'N/A'}`);
-        console.log(`   📊 Metadata: ${booking.metadata ? JSON.stringify(booking.metadata) : 'N/A'}`);
-        console.log(`   📅 Updated At: ${booking.updatedAt.toISOString()}`);
-        console.log(`   📅 Last Modified: ${booking.lastModified || 'N/A'}`);
-        console.log(`   🔄 Is Active: ${booking.isActive !== false}`);
-        console.log(`   🔄 Is Deleted: ${booking.isDeleted || false}`);
-        console.log(`   🔄 Deleted At: ${booking.deletedAt || 'N/A'}`);
-        console.log(`   🔄 Deleted By: ${booking.deletedBy || 'N/A'}`);
-        console.log(`   🔄 Deletion Reason: ${booking.deletionReason || 'N/A'}`);
-        console.log(`   🔄 Version: ${booking.__v || 0}`);
-        console.log(`   🔄 Document ID: ${booking.id || 'N/A'}`);
-        console.log(`   🔄 To Object: ${JSON.stringify(booking.toObject ? booking.toObject() : 'N/A')}`);
-        console.log(`   🔄 JSON: ${JSON.stringify(booking, null, 2)}`);
-        console.log('   ========================================');
-      });
+      // pendingBookings.forEach((booking, index) => {
+      //   console.log(`\n📝 Pending Booking #${index + 1} (PROTECTED):`);
+      //   console.log(`   🆔 Booking ID: ${booking._id}`);
+      //   console.log(`   👤 User ID: ${booking.user?._id || booking.user}`);
+      //   console.log(`   👤 User Name: ${booking.user?.name || 'N/A'}`);
+      //   console.log(`   👤 User Email: ${booking.user?.email || 'N/A'}`);
+      //   console.log(`   🏠 Host ID: ${booking.host?._id || booking.host}`);
+      //   console.log(`   🏠 Host Name: ${booking.host?.name || 'N/A'}`);
+      //   console.log(`   🏠 Host Email: ${booking.host?.email || 'N/A'}`);
+      //   console.log(`   📊 Status: ${booking.status} (PROTECTED - waiting for host approval)`);
+      //   console.log(`   💰 Total Amount: ₹${booking.totalAmount}`);
+      //   console.log(`   📅 Created At: ${booking.createdAt.toISOString()}`);
+      //   console.log(`   ⏰ Age: ${Math.round((now - booking.createdAt) / 1000 / 60)} minutes`);
+      //   console.log(`   🏠 Property: ${booking.listing || 'N/A'}`);
+      //   console.log(`   🎯 Service: ${booking.service || 'N/A'}`);
+      //   console.log(`   📝 Payment Status: ${booking.paymentStatus || 'N/A'}`);
+      //   console.log(`   🔄 Booking Type: ${booking.bookingType || 'N/A'}`);
+      //   console.log(`   📅 Check-in: ${booking.checkIn || 'N/A'}`);
+      //   console.log(`   📅 Check-out: ${booking.checkOut || 'N/A'}`);
+      //   console.log(`   ⏰ Time Slot: ${booking.timeSlot ? JSON.stringify(booking.timeSlot) : 'N/A'}`);
+      //   console.log(`   📝 Special Requests: ${booking.specialRequests || 'N/A'}`);
+      //   console.log(`   👥 Guest Details: ${booking.guestDetails ? JSON.stringify(booking.guestDetails) : 'N/A'}`);
+      //   console.log(`   🎫 Coupon: ${booking.couponCode || 'N/A'}`);
+      //   console.log(`   💳 Payment ID: ${booking.payment || 'N/A'}`);
+      //   console.log(`   🔄 Refund Status: ${booking.refundStatus || 'N/A'}`);
+      //   console.log(`   🔄 Refund Amount: ₹${booking.refundAmount || 0}`);
+      //   console.log(`   📝 Cancellation Reason: ${booking.cancellationReason || 'N/A'}`);
+      //   console.log(`   📅 Cancelled At: ${booking.cancelledAt || 'N/A'}`);
+      //   console.log(`   ✅ Checked In: ${booking.checkedIn || false}`);
+      //   console.log(`   ✅ Checked Out: ${booking.checkedOut || false}`);
+      //   console.log(`   📊 Pricing Breakdown: ${booking.pricingBreakdown ? 'Present' : 'Missing'}`);
+      //   console.log(`   📊 Subtotal: ₹${booking.subtotal || 0}`);
+      //   console.log(`   📊 Tax Amount: ₹${booking.taxAmount || 0}`);
+      //   console.log(`   📊 Platform Fee: ₹${booking.platformFee || 0}`);
+      //   console.log(`   📊 Processing Fee: ₹${booking.processingFee || 0}`);
+      //   console.log(`   📊 GST: ₹${booking.gst || 0}`);
+      //   console.log(`   📊 Host Fee: ₹${booking.hostFee || 0}`);
+      //   console.log(`   📊 Discount Amount: ₹${booking.discountAmount || 0}`);
+      //   console.log(`   📊 Host Earning: ₹${booking.hostEarning || 0}`);
+      //   console.log(`   📊 Cleaning Fee: ₹${booking.cleaningFee || 0}`);
+      //   console.log(`   📊 Service Fee: ₹${booking.serviceFee || 0}`);
+      //   console.log(`   📊 Security Deposit: ₹${booking.securityDeposit || 0}`);
+      //   console.log(`   📊 Hourly Extension: ₹${booking.hourlyExtension || 0}`);
+      //   console.log(`   📊 Currency: ${booking.currency || 'INR'}`);
+      //   console.log(`   📊 Cancellation Policy: ${booking.cancellationPolicy || 'N/A'}`);
+      //   console.log(`   📊 Booking Reference: ${booking.bookingReference || 'N/A'}`);
+      //   console.log(`   📊 Notes: ${booking.notes || 'N/A'}`);
+      //   console.log(`   📊 Metadata: ${booking.metadata ? JSON.stringify(booking.metadata) : 'N/A'}`);
+      //   console.log(`   📅 Updated At: ${booking.updatedAt.toISOString()}`);
+      //   console.log(`   📅 Last Modified: ${booking.lastModified || 'N/A'}`);
+      //   console.log(`   🔄 Is Active: ${booking.isActive !== false}`);
+      //   console.log(`   🔄 Is Deleted: ${booking.isDeleted || false}`);
+      //   console.log(`   🔄 Deleted At: ${booking.deletedAt || 'N/A'}`);
+      //   console.log(`   🔄 Deleted By: ${booking.deletedBy || 'N/A'}`);
+      //   console.log(`   🔄 Deletion Reason: ${booking.deletionReason || 'N/A'}`);
+      //   console.log(`   🔄 Version: ${booking.__v || 0}`);
+      //   console.log(`   🔄 Document ID: ${booking.id || 'N/A'}`);
+      //   console.log(`   🔄 To Object: ${JSON.stringify(booking.toObject ? booking.toObject() : 'N/A')}`);
+      //   console.log(`   🔄 JSON: ${JSON.stringify(booking, null, 2)}`);
+      //   console.log('   ========================================');
+      // });
     } else {
       console.log('✅ No pending bookings found (all good)');
     }
