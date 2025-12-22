@@ -25,12 +25,23 @@ const port = process.env.PORT;
 console.log('🚀 Starting TripMe Backend Server...');
 console.log('Environment:', process.env.NODE_ENV || 'production');
 console.log('Port:', port);
-// console.log('Frontend URL:', process.env.FRONTEND_URL);
+console.log('Frontend URL:', process.env.FRONTEND_URL);
+
+// console.log(
+//   'Razorpay ready at boot?',
+//   razorpayService.isInitialized()
+// );
 
 console.log(
-  'Razorpay ready at boot?',
-  razorpayService.isInitialized()
+  'Razorpay lazy init mode. Env present:',
+  !!process.env.RAZORPAY_KEY_ID,
+  !!process.env.RAZORPAY_KEY_SECRET
 );
+
+// Initialize Razorpay payment gateway
+razorpayService.initializeRazorpay();
+console.log('Razorpay initialized:', razorpayService.isInitialized());
+
 // Connect to database
 connectDB();
 

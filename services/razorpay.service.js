@@ -4,7 +4,7 @@
  */
 
 let razorpayInstance = null;
-
+const Razorpay = require('razorpay');
 function initializeRazorpay() {
   if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
     console.log(
@@ -16,7 +16,7 @@ function initializeRazorpay() {
   }
 
   if (!razorpayInstance) {
-    const Razorpay = require('razorpay');
+    
     razorpayInstance = new Razorpay({
       key_id: process.env.RAZORPAY_KEY_ID,
       key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -34,12 +34,12 @@ function isInitialized() {
 }
 
 async function createOrder(amount, currency = 'INR', receipt, meta = {}) {
-  if (!isInitialized()) {
-    initializeRazorpay();
-    if (!isInitialized()) {
-      throw new Error('Razorpay not initialized: Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET');
-    }
-  }
+  // if (!isInitialized()) {
+  //   initializeRazorpay();
+  //   if (!isInitialized()) {
+  //     throw new Error('Razorpay not initialized: Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET');
+  //   }
+  // }
 
   const amountPaise = Math.round(Number(amount) * 100);
 
@@ -66,6 +66,7 @@ async function createOrder(amount, currency = 'INR', receipt, meta = {}) {
 async function fetchPaymentStatus(paymentId) {
   if (!isInitialized()) {
     initializeRazorpay();
+   
     if (!isInitialized()) throw new Error('Razorpay not initialized');
   }
   return razorpayInstance.payments.fetch(paymentId);
