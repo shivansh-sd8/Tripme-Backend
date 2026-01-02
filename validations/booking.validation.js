@@ -2,6 +2,17 @@ const Joi = require('joi');
 
 // Create booking validation
 const validateBooking = (req, res, next) => {
+  console.log('🔍 ===========================================');
+  console.log('🔍 validateBooking middleware called');
+  console.log('🔍 Request body keys:', Object.keys(req.body));
+  console.log('🔍 paymentData present:', !!req.body.paymentData);
+  if (req.body.paymentData) {
+    console.log('🔍 paymentData keys:', Object.keys(req.body.paymentData));
+    console.log('🔍 paymentData.razorpayOrderId:', req.body.paymentData.razorpayOrderId);
+    console.log('🔍 paymentData.razorpayPaymentId:', req.body.paymentData.razorpayPaymentId);
+    console.log('🔍 paymentData.razorpaySignature:', req.body.paymentData.razorpaySignature ? 'present' : 'missing');
+  }
+  console.log('🔍 ===========================================');
   
   const schema = Joi.object({
     propertyId: Joi.string()
@@ -94,10 +105,10 @@ const validateBooking = (req, res, next) => {
         })
     }).required(),
     paymentMethod: Joi.string()
-      .valid('card', 'paypal', 'apple_pay', 'google_pay')
+      .valid('card', 'paypal', 'apple_pay', 'google_pay', 'razorpay')
       .optional()
       .messages({
-        'any.only': 'Payment method must be one of: card, paypal, apple_pay, google_pay'
+        'any.only': 'Payment method must be one of: card, paypal, apple_pay, google_pay, razorpay'
       }),
     couponCode: Joi.string()
       .max(20)
@@ -146,7 +157,34 @@ const validateBooking = (req, res, next) => {
       .messages({
         'string.base': 'Idempotency key must be a string'
       }),
+    pricingToken: Joi.string()
+      .optional()
+      .messages({
+        'string.base': 'Pricing token must be a string'
+      }),
     paymentData: Joi.object({
+      // Razorpay payment fields
+      razorpayOrderId: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'Razorpay order ID must be a string'
+        }),
+      razorpayPaymentId: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'Razorpay payment ID must be a string'
+        }),
+      razorpaySignature: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'Razorpay signature must be a string'
+        }),
+      razorpayPaymentDetails: Joi.object()
+        .optional()
+        .messages({
+          'object.base': 'Razorpay payment details must be an object'
+        }),
+      // Legacy payment fields (for other payment gateways)
       amount: Joi.number()
         .min(0.01)
         .optional()
@@ -188,8 +226,19 @@ const validateBooking = (req, res, next) => {
         .optional()
         .messages({
           'number.min': 'Discount amount cannot be negative'
+        }),
+      // Additional metadata fields
+      timestamp: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'Timestamp must be a string'
+        }),
+      clientVersion: Joi.string()
+        .optional()
+        .messages({
+          'string.base': 'Client version must be a string'
         })
-    }).optional(),
+    }).optional().unknown(true), // Allow unknown fields in paymentData
     securityMetadata: Joi.object({
       userAgent: Joi.string()
         .optional()
@@ -209,8 +258,17 @@ const validateBooking = (req, res, next) => {
     }).optional()
   });
 
-  const { error } = schema.validate(req.body);
+  const { error } = schema.validate(req.body, { abortEarly: false });
   if (error) {
+    console.error('❌ ===========================================');
+    console.error('❌ Validation failed in validateBooking');
+    console.error('❌ Error details:', error.details);
+    console.error('❌ Validation errors:', error.details.map(d => ({
+      field: d.path.join('.'),
+      message: d.message,
+      type: d.type
+    })));
+    console.error('❌ ===========================================');
     return res.status(400).json({
       success: false,
       message: 'Validation error',
@@ -220,6 +278,8 @@ const validateBooking = (req, res, next) => {
       }))
     });
   }
+
+  console.log('✅ Validation passed in validateBooking');
 
   // Custom validation: ensure at least one of propertyId, listingId, or serviceId is provided
   const { propertyId, listingId, serviceId } = req.body;

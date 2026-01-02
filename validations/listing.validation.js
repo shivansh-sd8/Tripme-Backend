@@ -3,6 +3,7 @@ const Joi = require('joi');
 // Create listing validation
 const validateListing = (req, res, next) => {
   
+  console.log('validateListing', req.body);
   const schema = Joi.object({
     title: Joi.string()
       .min(10)
@@ -29,19 +30,19 @@ const validateListing = (req, res, next) => {
         'any.only': 'Property type must be one of the valid options',
         'any.required': 'Property type is required'
       }),
-    propertyType: Joi.string()
-      .valid('premium', 'standard', 'budget', 'luxury')
-      .default('standard')
-      .messages({
-        'any.only': 'Property category must be one of: premium, standard, budget, luxury',
-        'any.required': 'Property category is required'
-      }),
-    style: Joi.string()
-      .valid('modern', 'traditional', 'minimalist', 'rustic', 'industrial', 'scandinavian', 'mediterranean', 'tropical')
-      .default('modern')
-      .messages({
-        'any.only': 'Style must be one of the valid options'
-      }),
+    // propertyType: Joi.string()
+    //   .valid('premium', 'standard', 'budget', 'luxury')
+    //   .default('standard')
+    //   .messages({
+    //     'any.only': 'Property category must be one of: premium, standard, budget, luxury',
+    //     'any.required': 'Property category is required'
+    //   }),
+    // style: Joi.string()
+    //   .valid('modern', 'traditional', 'minimalist', 'rustic', 'industrial', 'scandinavian', 'mediterranean', 'tropical')
+    //   .default('modern')
+    //   .messages({
+    //     'any.only': 'Style must be one of the valid options'
+    //   }),
 
     maxGuests: Joi.number()
       .min(1)
@@ -138,6 +139,14 @@ const validateListing = (req, res, next) => {
           'number.min': 'Security deposit cannot be negative',
           'number.max': 'Security deposit cannot exceed $5,000'
         }),
+         weekendPremium: Joi.number()
+        .min(0)
+        .max(100)
+        .default(0)
+        .messages({
+          'number.min': 'weekedPremium cannot be negative',
+          'number.max': 'weekedPremium cannot exceed 100%'
+        }),
       currency: Joi.string()
         .valid('USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'INR')
         .default('INR')
@@ -159,8 +168,11 @@ const validateListing = (req, res, next) => {
         .messages({
           'number.min': 'Monthly discount cannot be negative',
           'number.max': 'Monthly discount cannot exceed 100%'
-        })
+        }),
     }).required(),
+
+   
+    
     hourlyBooking: Joi.object({
       enabled: Joi.boolean()
         .default(false)
@@ -384,6 +396,8 @@ const validateListing = (req, res, next) => {
 
   next();
 };
+
+
 
 // Update listing validation
 const validateListingUpdate = (req, res, next) => {

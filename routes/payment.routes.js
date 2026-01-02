@@ -27,10 +27,17 @@ const validateBody = (schema) => (req, res, next) => {
   }
 };
 
+// Payment webhooks (for payment gateway callbacks - NO AUTH REQUIRED)
+// These must be before auth middleware as they are called by payment gateways
+router.post('/webhook/stripe', express.raw({ type: 'application/json' }), paymentController.stripeWebhook);
+router.post('/webhook/paypal', express.raw({ type: 'application/json' }), paymentController.paypalWebhook);
+router.post('/webhook/razorpay', express.raw({ type: 'application/json' }), paymentController.razorpayWebhook);
+
 // Protected routes (require authentication)
 router.use(auth);
 
 // Payment processing (with rate limiting)
+router.post('/create-order', strictRateLimit, paymentController.createRazorpayOrder);
 router.post('/process', strictRateLimit, validateBody(validatePayment), paymentController.processPayment);
 router.post('/confirm/:paymentId', strictRateLimit, paymentController.confirmPayment);
 router.post('/cancel/:paymentId', strictRateLimit, paymentController.cancelPayment);
@@ -54,9 +61,6 @@ router.post('/:paymentId/refund', AuthorizationMiddleware.canAccessPayment, vali
 router.get('/refunds', paymentController.getRefundHistory);
 router.get('/refunds/:refundId', AuthorizationMiddleware.canAccessPayment, paymentController.getRefundById);
 
-// Payment webhooks (for payment gateway callbacks)
-router.post('/webhook/stripe', paymentController.stripeWebhook);
-router.post('/webhook/paypal', paymentController.paypalWebhook);
 
 // Payment statistics and analytics
 router.get('/stats/overview', paymentController.getPaymentStats);
