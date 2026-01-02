@@ -189,6 +189,10 @@ const getPropertyAvailability = async (req, res) => {
       const slotObj = slot.toObject();
       const dateStr = new Date(slotObj.date).toISOString().split('T')[0];
       
+      // Normalize slot date for comparison (used in multiple places)
+      const slotDateLocal = new Date(new Date(slotObj.date).getFullYear(), new Date(slotObj.date).getMonth(), new Date(slotObj.date).getDate());
+      const slotDateStr = slotDateLocal.toISOString().split('T')[0];
+      
       if (slotObj.bookedBy && typeof slotObj.bookedBy === 'object') {
         slotObj.checkInDate = slotObj.bookedBy.checkIn;
         slotObj.checkOutDate = slotObj.bookedBy.checkOut;
@@ -208,18 +212,25 @@ const getPropertyAvailability = async (req, res) => {
           const checkoutDateLocal = new Date(checkoutDate.getFullYear(), checkoutDate.getMonth(), checkoutDate.getDate());
           const checkoutDateStr = checkoutDateLocal.toISOString().split('T')[0];
           
-          // Also normalize slot date for comparison
-          const slotDateLocal = new Date(new Date(slotObj.date).getFullYear(), new Date(slotObj.date).getMonth(), new Date(slotObj.date).getDate());
-          const slotDateStr = slotDateLocal.toISOString().split('T')[0];
-          
           console.log(`🔍 Comparing dates: slotDate=${slotDateStr}, checkoutDate=${checkoutDateStr}, status=${slotObj.status}`);
           
-          // If this date is the checkout date
-          if (slotDateStr === checkoutDateStr && (slotObj.status === 'booked' || slotObj.status === 'blocked')) {
-            console.log(`✅ Processing checkout date: ${slotDateStr} (slot status: ${slotObj.status}, checkoutTime: ${slotObj.checkOutTime || 'N/A'})`);
+          // If this date is the checkout date - process it regardless of current status
+          // (it might be 'partially-available', 'booked', or 'blocked')
+          // BUT: Skip processing if booking is cancelled - respect host's manual status change
+          if (slotDateStr === checkoutDateStr) {
+            // Check if booking is cancelled - if so, skip checkout date processing
+            const bookingStatus = slotObj.bookedBy?.status;
+            const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
             
-            // Get maintenance hours from property
-            const maintenanceHours = property?.availabilitySettings?.hostBufferTime || 2;
+            if (bookingStatus && inactiveStatuses.includes(bookingStatus)) {
+              console.log(`⚠️ Booking is ${bookingStatus} - skipping checkout date processing, respecting current status: ${slotObj.status}`);
+              // Don't process as checkout date - respect the current status (likely manually set by host)
+              // Continue to next iteration
+            } else {
+              console.log(`✅ Processing checkout date: ${slotDateStr} (slot status: ${slotObj.status}, checkoutTime: ${slotObj.checkOutTime || 'N/A'})`);
+              
+              // Get maintenance hours from property
+              const maintenanceHours = property?.availabilitySettings?.hostBufferTime || 2;
             
             // Create checkout datetime using the LOCAL date string (not UTC) to avoid timezone shifts
             // Use the normalized checkoutDateStr to build the date in local timezone
@@ -291,8 +302,87 @@ const getPropertyAvailability = async (req, res) => {
               };
               console.log(`✅ Checkout date ${dateStr} partially available (check-in must be after ${maintenanceEndTime.toISOString()})`);
             }
+            } // Close else block for active booking checkout date processing
           } // Close the nested if for checkout date match
         } // Close the else block for checkOutDate check
+      }
+
+      // Check if this date is a checkout date from checkoutDatesMap (even if it doesn't have bookedBy)
+      // This handles cases where checkout date was marked as 'partially-available' but bookedBy wasn't populated
+      if (!slotObj.bookedBy && checkoutDatesMap.has(dateStr)) {
+        const checkoutInfo = checkoutDatesMap.get(dateStr);
+        const checkoutDate = new Date(checkoutInfo.checkoutDate);
+        const checkoutDateLocal = new Date(checkoutDate.getFullYear(), checkoutDate.getMonth(), checkoutDate.getDate());
+        const checkoutDateStr = checkoutDateLocal.toISOString().split('T')[0];
+        
+        if (slotDateStr === checkoutDateStr) {
+          // Check if booking is cancelled - if so, skip checkout date processing
+          const bookingStatus = checkoutInfo.booking?.status;
+          const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+          
+          if (bookingStatus && inactiveStatuses.includes(bookingStatus)) {
+            console.log(`⚠️ Booking is ${bookingStatus} - skipping checkout date processing from checkoutDatesMap, respecting current status: ${slotObj.status}`);
+            // Don't process as checkout date - respect the current status (likely manually set by host)
+            // Continue to next iteration
+          } else {
+            console.log(`✅ Found checkout date ${dateStr} in checkoutDatesMap (no bookedBy), processing...`);
+            
+            // Get maintenance hours from property
+            const maintenanceHours = property?.availabilitySettings?.hostBufferTime || 2;
+          
+          // Create checkout datetime
+          const [year, month, day] = checkoutDateStr.split('-').map(Number);
+          const checkoutTime = new Date(year, month - 1, day, 0, 0, 0, 0);
+          
+          if (checkoutInfo.checkoutTime) {
+            const [hours, minutes] = checkoutInfo.checkoutTime.split(':').map(Number);
+            checkoutTime.setHours(hours, minutes, 0, 0);
+          } else {
+            checkoutTime.setHours(15, 0, 0, 0); // Default 3 PM
+          }
+          
+          const maintenanceEndTime = new Date(checkoutTime.getTime() + maintenanceHours * 60 * 60 * 1000);
+          
+          // Check if it's a future date
+          const checkoutDateOnly = new Date(checkoutDate);
+          checkoutDateOnly.setUTCHours(0, 0, 0, 0);
+          const todayOnly = new Date(now);
+          todayOnly.setUTCHours(0, 0, 0, 0);
+          const isCheckoutTodayOrPast = checkoutDateOnly <= todayOnly;
+          
+          // Set booking info
+          slotObj.checkInDate = checkoutInfo.booking.checkIn;
+          slotObj.checkOutDate = checkoutInfo.checkoutDate;
+          slotObj.checkInTime = checkoutInfo.booking.checkInTime;
+          slotObj.checkOutTime = checkoutInfo.checkoutTime;
+          slotObj.guestName = checkoutInfo.booking.user?.name;
+          
+          if (isCheckoutTodayOrPast && now >= maintenanceEndTime) {
+            slotObj.status = 'available';
+            slotObj.maintenance = {
+              start: checkoutTime,
+              end: maintenanceEndTime,
+              availableAfter: maintenanceEndTime,
+              ended: true
+            };
+          } else if (isCheckoutTodayOrPast && now >= checkoutTime && now < maintenanceEndTime) {
+            slotObj.status = 'maintenance';
+            slotObj.maintenance = {
+              start: checkoutTime,
+              end: maintenanceEndTime,
+              availableAfter: maintenanceEndTime
+            };
+          } else {
+            slotObj.status = 'partially-available';
+            slotObj.maintenance = {
+              start: checkoutTime,
+              end: maintenanceEndTime,
+              availableAfter: maintenanceEndTime,
+              requiresLaterCheckIn: true
+            };
+          }
+          } // Close else block for active booking checkout date processing from checkoutDatesMap
+        }
       }
 
       // Add maintenance info if exists for this date (for non-checkout dates)
@@ -318,6 +408,15 @@ const getPropertyAvailability = async (req, res) => {
       );
       
       if (!existsInAvailability) {
+        // Check if booking is cancelled - if so, skip adding checkout date
+        const bookingStatus = checkoutInfo.booking?.status;
+        const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+        
+        if (bookingStatus && inactiveStatuses.includes(bookingStatus)) {
+          console.log(`⚠️ Booking is ${bookingStatus} - skipping adding checkout date ${checkoutDateStr} to availability (cancelled booking)`);
+          continue; // Skip this checkout date
+        }
+        
         // This is a checkout date without an Availability record - add it as partially-available
         const checkoutDate = new Date(checkoutInfo.checkoutDate);
         const [year, month, day] = checkoutDateStr.split('-').map(Number);
@@ -792,6 +891,82 @@ const updateAvailability = async (req, res) => {
       });
 
       if (existingAvailability) {
+        // ========================================
+        // VALIDATION: Prevent hosts from overriding booked/partially-available dates
+        // Allow changes if booking is cancelled, rejected, or expired
+        // ========================================
+        const currentStatus = existingAvailability.status;
+        const Booking = require('../models/Booking');
+        
+        // Prevent changing "booked" status - these are confirmed bookings
+        if (currentStatus === 'booked' && status && status !== 'booked') {
+          // Check if there's a booking associated with this date
+          const booking = existingAvailability.bookedBy 
+            ? await Booking.findById(existingAvailability.bookedBy)
+            : null;
+          
+          if (booking) {
+            // Allow change if booking is cancelled, rejected, or expired
+            const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+            if (!inactiveStatuses.includes(booking.status)) {
+              return res.status(403).json({
+                success: false,
+                message: 'Cannot change status of a booked date. This date has an active booking and cannot be modified.'
+              });
+            }
+            // If booking is cancelled/rejected/expired, allow the change
+          } else {
+            // No booking found but status is booked - allow change (might be data inconsistency)
+          }
+        }
+        
+        // Prevent changing "partially-available" to "available" unless maintenance time has passed or booking is cancelled
+        if (currentStatus === 'partially-available' && status === 'available') {
+          // Check if there's a booking associated with this date
+          const booking = existingAvailability.bookedBy 
+            ? await Booking.findById(existingAvailability.bookedBy)
+            : null;
+          
+          if (booking) {
+            // Allow change if booking is cancelled, rejected, or expired
+            const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+            if (inactiveStatuses.includes(booking.status)) {
+              // Booking is cancelled - allow the change
+              console.log(`✅ Booking is cancelled/rejected/expired - allowing change from partially-available to available`);
+            } else {
+              console.log('Booking is active - checking if maintenance time has passed' , booking.checkOutTime);
+              // Booking is active - check if maintenance time has passed
+              const maintenanceHours = property?.availabilitySettings?.hostBufferTime || 2;
+              const checkoutTime = booking.checkOutTime || '11:00';
+              const [checkoutHour, checkoutMinute] = checkoutTime.split(':').map(Number);
+              
+              const checkoutDate = new Date(booking.checkOut);
+              const checkoutDateTime = new Date(checkoutDate);
+              checkoutDateTime.setHours(checkoutHour, checkoutMinute, 0, 0);
+              
+              const maintenanceEndTime = new Date(checkoutDateTime.getTime() + maintenanceHours * 60 * 60 * 1000);
+              const now = new Date();
+              
+              if (now < maintenanceEndTime) {
+                console.log('Maintenance time has not passed' , maintenanceEndTime);
+                return res.status(403).json({
+                  success: false,
+                  message: `Cannot change partially-available date to available. Property is in maintenance until ${maintenanceEndTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}.`,
+                  maintenanceEndTime: maintenanceEndTime.toISOString()
+                });
+              }
+            }
+          } else {
+            // No booking found - this could mean:
+            // 1. Booking was cancelled and bookedBy was cleared
+            // 2. Data inconsistency
+            // Since status is partially-available but no booking reference, allow the change
+            // (The host should be able to manually fix this)
+            console.log(`⚠️ Partially-available date ${dateStr} has no bookedBy reference - allowing change (likely cancelled booking)`);
+            // Allow the change - don't return error
+          }
+        }
+        
         // Update existing record
         existingAvailability.status = status !== undefined ? status : existingAvailability.status;
         existingAvailability.reason = reason !== undefined ? reason : existingAvailability.reason;
@@ -846,6 +1021,83 @@ const updateAvailability = async (req, res) => {
           success: false,
           message: 'Availability entry does not belong to this property'
         });
+      }
+
+      // ========================================
+      // VALIDATION: Prevent hosts from overriding booked/partially-available dates
+      // Allow changes if booking is cancelled, rejected, or expired
+      // ========================================
+      const currentStatus = availability.status;
+      const Booking = require('../models/Booking');
+      
+      // Prevent changing "booked" status - these are confirmed bookings
+      if (currentStatus === 'booked' && status && status !== 'booked') {
+        // Check if there's a booking associated with this date
+        const booking = availability.bookedBy 
+          ? await Booking.findById(availability.bookedBy)
+          : null;
+        
+        if (booking) {
+          // Allow change if booking is cancelled, rejected, or expired
+          const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+          if (!inactiveStatuses.includes(booking.status)) {
+            return res.status(403).json({
+              success: false,
+              message: 'Cannot change status of a booked date. This date has an active booking and cannot be modified.'
+            });
+          }
+          // If booking is cancelled/rejected/expired, allow the change
+        } else {
+          // No booking found but status is booked - allow change (might be data inconsistency)
+        }
+      }
+      
+      // Prevent changing "partially-available" to "available" unless maintenance time has passed or booking is cancelled
+      if (currentStatus === 'partially-available' && status === 'available') {
+        // Check if there's a booking associated with this date
+        const booking = availability.bookedBy 
+          ? await Booking.findById(availability.bookedBy)
+          : null;
+        
+        if (booking) {
+          // Allow change if booking is cancelled, rejected, or expired
+          const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+          if (inactiveStatuses.includes(booking.status)) {
+            // Booking is cancelled - allow the change
+            console.log(`✅ Booking is cancelled/rejected/expired - allowing change from partially-available to available`);
+          } else {
+            // Booking is active - check if maintenance time has passed
+            console.log('Booking is active - checking if maintenance time has passed' , booking.checkOutTime);
+            const maintenanceHours = property?.availabilitySettings?.hostBufferTime || 2;
+            const checkoutTime = booking.checkOutTime || '11:00';
+            const [checkoutHour, checkoutMinute] = checkoutTime.split(':').map(Number);
+            
+            const checkoutDate = new Date(booking.checkOut);
+            const checkoutDateTime = new Date(checkoutDate);
+            checkoutDateTime.setHours(checkoutHour, checkoutMinute, 0, 0);
+            
+            const maintenanceEndTime = new Date(checkoutDateTime.getTime() + maintenanceHours * 60 * 60 * 1000);
+            const now = new Date();
+            
+            if (now < maintenanceEndTime) {
+              console.log('Maintenance time has not passed' , maintenanceEndTime);
+              return res.status(403).json({
+                success: false,
+                message: `Cannot change partially-available date to available. Property is in maintenance until ${maintenanceEndTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}.`,
+                maintenanceEndTime: maintenanceEndTime.toISOString()
+              });
+            }
+          }
+        } else {
+          // No booking found - this could mean:
+          // 1. Booking was cancelled and bookedBy was cleared
+          // 2. Data inconsistency
+          // Since status is partially-available but no booking reference, allow the change
+          // (The host should be able to manually fix this)
+          const dateStr = new Date(availability.date).toISOString().split('T')[0];
+          console.log(`⚠️ Partially-available date ${dateStr} has no bookedBy reference - allowing change (likely cancelled booking)`);
+          // Allow the change - don't return error
+        }
       }
 
       availability.status = status !== undefined ? status : availability.status;
@@ -951,6 +1203,92 @@ const bulkUpdateAvailability = async (req, res) => {
         success: false,
         message: 'You can only manage availability for your own properties'
       });
+    }
+
+    // ========================================
+    // VALIDATION: Check each update for booked/partially-available dates
+    // Allow changes if booking is cancelled, rejected, or expired
+    // ========================================
+    const Booking = require('../models/Booking');
+    const now = new Date();
+    const maintenanceHours = property?.availabilitySettings?.hostBufferTime || 2;
+    
+    for (const update of updates) {
+      const existingAvailability = await Availability.findOne({
+        property: propertyId,
+        date: new Date(update.date)
+      });
+      
+      if (existingAvailability) {
+        const currentStatus = existingAvailability.status;
+        
+        // Prevent changing "booked" status
+        if (currentStatus === 'booked' && update.status && update.status !== 'booked') {
+          const booking = existingAvailability.bookedBy 
+            ? await Booking.findById(existingAvailability.bookedBy)
+            : null;
+          
+          if (booking) {
+            // Allow change if booking is cancelled, rejected, or expired
+            const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+            if (!inactiveStatuses.includes(booking.status)) {
+              return res.status(403).json({
+                success: false,
+                message: `Cannot change status of booked date ${update.date}. This date has an active booking and cannot be modified.`,
+                date: update.date
+              });
+            }
+            // If booking is cancelled/rejected/expired, allow the change
+          } else {
+            // No booking found but status is booked - allow change (might be data inconsistency)
+          }
+        }
+        
+        // Prevent changing "partially-available" to "available" unless maintenance time has passed or booking is cancelled
+        if (currentStatus === 'partially-available' && update.status === 'available') {
+          const booking = existingAvailability.bookedBy 
+            ? await Booking.findById(existingAvailability.bookedBy)
+            : null;
+          
+          if (booking) {
+            // Allow change if booking is cancelled, rejected, or expired
+            const inactiveStatuses = ['cancelled', 'rejected', 'expired'];
+            if (inactiveStatuses.includes(booking.status)) {
+              // Booking is cancelled - allow the change
+              console.log(`✅ Booking is cancelled/rejected/expired - allowing change from partially-available to available for date ${update.date}`);
+            } else {
+              // Booking is active - check if maintenance time has passed
+              console.log('Booking is active - checking if maintenance time has passed' , booking.checkOutTime);
+              const checkoutTime = booking.checkOutTime || '11:00';
+              const [checkoutHour, checkoutMinute] = checkoutTime.split(':').map(Number);
+              
+              const checkoutDate = new Date(booking.checkOut);
+              const checkoutDateTime = new Date(checkoutDate);
+              checkoutDateTime.setHours(checkoutHour, checkoutMinute, 0, 0);
+              
+              const maintenanceEndTime = new Date(checkoutDateTime.getTime() + maintenanceHours * 60 * 60 * 1000);
+              
+              if (now < maintenanceEndTime) {
+                console.log('Maintenance time has not passed' , maintenanceEndTime);
+                return res.status(403).json({
+                  success: false,
+                  message: `Cannot change partially-available date ${update.date} to available. Property is in maintenance until ${maintenanceEndTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}.`,
+                  date: update.date,
+                  maintenanceEndTime: maintenanceEndTime.toISOString()
+                });
+              }
+            }
+          } else {
+            // No booking found - this could mean:
+            // 1. Booking was cancelled and bookedBy was cleared
+            // 2. Data inconsistency
+            // Since status is partially-available but no booking reference, allow the change
+            // (The host should be able to manually fix this)
+            console.log(`⚠️ Partially-available date ${update.date} has no bookedBy reference - allowing change (likely cancelled booking)`);
+            // Allow the change - don't return error
+          }
+        }
+      }
     }
 
     const bulkOps = updates.map(update => {
@@ -1584,6 +1922,7 @@ const getNextAvailableSlot = async (req, res) => {
 // @route   GET /api/availability/:propertyId/check-slot
 // @access  Public
 // Query params: checkIn (ISO date), checkOut (ISO date), extension (optional hours)
+
 const checkTimeSlotAvailability = async (req, res) => {
   try {
     const { propertyId } = req.params;
@@ -1655,7 +1994,7 @@ const checkTimeSlotAvailability = async (req, res) => {
         $gte: new Date(startDateStr),
         $lte: new Date(endDateStr)
       },
-      status: { $in: ['booked', 'blocked', 'maintenance', 'unavailable', 'available', 'on-hold'] }
+      status: { $in: ['booked', 'blocked', 'maintenance', 'unavailable', 'available', 'partially-available','on-hold'] }
     }).populate('bookedBy', 'checkOut checkOutTime');
     
     // Create a map of dates that have explicit availability records
@@ -1672,11 +2011,12 @@ const checkTimeSlotAvailability = async (req, res) => {
     for (const dateStr of allDatesInRange) {
       if (!availabilityMap.has(dateStr)) {
         // Date has no explicit record - default to unavailable
-        missingDates.push(dateStr);
+         missingDates.push(dateStr);
+        // continue;
       } else {
         const slot = availabilityMap.get(dateStr);
         // Check if the date has a blocking status (not 'available')
-        if (slot.status !== 'available') {
+        if (!['available', 'partially-available'].includes(slot.status))  {
           datesWithBlockingStatus.push({ dateStr, status: slot.status });
         }
       }
@@ -1885,6 +2225,7 @@ const checkTimeSlotAvailability = async (req, res) => {
       ['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold'].includes(slot.status)
     );
     
+    console.log("blocking dates", blockingDates);
     // If any dates in the range don't have explicit availability records, they're unavailable
     // Add missing dates as conflicts
     if (missingDates.length > 0) {
@@ -1927,6 +2268,16 @@ const checkTimeSlotAvailability = async (req, res) => {
         duration
       );
     }
+
+        const data = {
+        available: !hasConflicts,
+        checkIn: checkInDate.toISOString(),
+        checkOut: checkOutDate.toISOString(),
+        extensionHours,
+        maintenanceEnd: maintenanceEndDate.toISOString()
+      };
+
+      console.log("ghfjflj fknfrrhvwbjekfef", data);
 
     res.status(200).json({
       success: true,

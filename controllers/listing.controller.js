@@ -82,6 +82,42 @@ const createListing = async (req, res) => {
       });
     }
 
+    // Check KYC status - required for publishing listings
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Check if KYC is verified or within grace period
+    const kycStatus = user.kyc?.status || 'not_submitted';
+    let kycDeadline = user.kyc?.deadline;
+    
+    // If this is the first listing and no deadline set, set 15-day grace period
+    if (!kycDeadline && kycStatus !== 'verified') {
+      const gracePeriodDays = 15;
+      kycDeadline = new Date();
+      kycDeadline.setDate(kycDeadline.getDate() + gracePeriodDays);
+      
+      // Update user with grace period deadline
+      await User.findByIdAndUpdate(req.user.id, {
+        'kyc.deadline': kycDeadline
+      });
+    }
+    
+    const isWithinGracePeriod = kycDeadline && new Date(kycDeadline) > new Date();
+    
+    // If KYC not submitted and grace period expired, block publishing
+    if (kycStatus !== 'verified' && kycStatus !== 'pending' && !isWithinGracePeriod) {
+      return res.status(403).json({
+        success: false,
+        message: 'KYC verification is required to publish listings. Your grace period has expired.',
+        kycRequired: true
+      });
+    }
+
     // Validate required fields
     if (!title || !description || !location || !type || !pricing) {
       return res.status(400).json({

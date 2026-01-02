@@ -873,17 +873,17 @@ const processPaymentAndCreateBooking = async (req, res) => {
       try {
         console.log('🔄 Updating availability status from "blocked" to "booked"...');
         
-        // Use the EXACT SAME logic as blocking section to ensure date format matches
-        const updateStart = normalizeToLocalMidnight(checkIn);
-        const updateEnd = normalizeToLocalMidnight(checkOut); // Use checkOut, same as blocking
+        // Use the SAME logic as blocking section to ensure we match the exact dates
+        const start = normalizeToLocalMidnight(checkIn);
+        const end = normalizeToLocalMidnight(checkOut); // Use checkOut, same as blocking
 
-        const dateStringsToUpdate = [];
-        const updateCurrent = new Date(updateStart);
+        const datesToUpdate = [];
+        const current = new Date(start);
 
-        while (updateCurrent < updateEnd) {
-          const dateStr = formatLocalDate(updateCurrent); // Use formatLocalDate to match blocking format
-          dateStringsToUpdate.push(dateStr); // Store as strings first
-          updateCurrent.setDate(updateCurrent.getDate() + 1);
+        while (current < end) {
+          const dateStr = formatLocalDate(current); // Use formatLocalDate to match blocking format
+          datesToUpdate.push(new Date(dateStr)); // Convert to Date object matching blocking format
+          current.setDate(current.getDate() + 1);
         }
         
         // Add additional dates for hourly extensions if they extend to next day (same as blocking)
@@ -896,24 +896,21 @@ const processPaymentAndCreateBooking = async (req, res) => {
           
           additionalDates.forEach(date => {
             const dateStr = date.toISOString().split('T')[0];
-            if (!dateStringsToUpdate.includes(dateStr)) {
-              dateStringsToUpdate.push(dateStr);
+            const dateObj = new Date(dateStr);
+            if (!datesToUpdate.some(d => d.toISOString().split('T')[0] === dateStr)) {
+              datesToUpdate.push(dateObj);
             }
           });
         }
         
-        console.log(`📅 Date strings to update to booked:`, dateStringsToUpdate);
-        
-        // Convert date strings to Date objects the SAME WAY as blocking: new Date(dateStr)
-        const datesToUpdateAsDateObjects = dateStringsToUpdate.map(dateStr => new Date(dateStr));
-        
-        console.log(`📅 Date objects to update:`, datesToUpdateAsDateObjects.map(d => d.toISOString()));
+        console.log(`📅 Dates to update to booked:`, datesToUpdate.map(d => formatLocalDate(d)));
         
         // Update all blocked dates to booked
+        // Use $in with date strings converted to Date objects, matching the blocking format
         const updateResult = await Availability.updateMany(
           {
             property: actualListingId,
-            date: { $in: datesToUpdateAsDateObjects },
+            date: { $in: datesToUpdate },
             status: 'blocked'
           },
           {
@@ -930,34 +927,27 @@ const processPaymentAndCreateBooking = async (req, res) => {
           }
         );
         
-        console.log(`✅ Successfully matched ${updateResult.matchedCount}, updated ${updateResult.modifiedCount} dates from "blocked" to "booked"`);
+        console.log(`✅ Successfully updated ${updateResult.modifiedCount} dates from "blocked" to "booked"`);
         
-        // Debug: If no dates were updated, log what's actually in the database
+        // Debug: Check if dates exist but weren't updated
         if (updateResult.modifiedCount === 0) {
-          console.log('⚠️ No dates were updated. Checking database for blocked dates...');
-          
-          const allBlockedDates = await Availability.find({
+          const existingBlocked = await Availability.find({
             property: actualListingId,
+            date: { $in: datesToUpdate },
             status: 'blocked'
-          }).select('date status').lean();
+          });
+          console.log(`⚠️ Found ${existingBlocked.length} blocked dates but updated 0. Dates in DB:`, 
+            existingBlocked.map(a => ({ date: a.date, status: a.status })));
           
-          console.log(`📊 Found ${allBlockedDates.length} blocked dates in DB:`, 
-            allBlockedDates.map(a => ({ 
-              date: a.date.toISOString(), 
-              status: a.status 
-            })));
-          
-          console.log(`📊 Date objects we're querying:`, 
-            datesToUpdateAsDateObjects.map(d => d.toISOString()));
-          
-          // Try alternative query using $expr with date string comparison
+          // Try alternative query with date range
+          const dateStrings = datesToUpdate.map(d => formatLocalDate(d));
           const alternativeResult = await Availability.updateMany(
             {
               property: actualListingId,
               $expr: {
                 $in: [
                   { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
-                  dateStringsToUpdate
+                  dateStrings
                 ]
               },
               status: 'blocked'
@@ -975,7 +965,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
               }
             }
           );
-          console.log(`🔄 Alternative $expr query updated ${alternativeResult.modifiedCount} dates`);
+          console.log(`🔄 Alternative query updated ${alternativeResult.modifiedCount} dates`);
         }
       } catch (updateError) {
         console.error('⚠️ Error updating availability status to booked:', updateError);

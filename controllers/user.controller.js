@@ -92,9 +92,11 @@ const becomeHost = async (req, res) => {
 
     // Check if user is already a host
     if (user.role === 'host') {
-      return res.status(400).json({
-        success: false,
-        message: 'User is already a host'
+      // Return success with current user data (already a host)
+      return res.status(200).json({
+        success: true,
+        message: 'User is already a host',
+        data: { user }
       });
     }
 
@@ -106,55 +108,40 @@ const becomeHost = async (req, res) => {
       });
     }
 
-    // Check if user has submitted KYC documents
-    if (!user.kyc || user.kyc.status === 'not_submitted') {
-      return res.status(400).json({
-        success: false,
-        message: 'Please submit KYC documents before applying to become a host'
-      });
+    // Upgrade to host role immediately
+    // KYC is required for publishing listings, not for becoming a host
+    user.role = 'host';
+    
+    // Set KYC deadline if not already set (15 days from now)
+    if (!user.kyc) {
+      user.kyc = {
+        status: 'not_submitted',
+        deadline: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000) // 15 days
+      };
+    } else if (!user.kyc.deadline) {
+      user.kyc.deadline = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000);
     }
+    
+    await user.save();
 
-    // Check if KYC is pending
-    if (user.kyc && user.kyc.status === 'pending') {
-      return res.status(400).json({
-        success: false,
-        message: 'Your KYC application is under review. Please wait for approval.'
-      });
-    }
+    // Create notification for user
+    await Notification.create({
+      user: user._id,
+      type: 'system',
+      title: 'Welcome to Hosting!',
+      message: 'You are now a host! Complete KYC verification within 15 days to publish your listings.',
+      metadata: { newRole: 'host', kycDeadline: user.kyc.deadline }
+    });
 
-    // Check if KYC was rejected
-    if (user.kyc && user.kyc.status === 'rejected') {
-      return res.status(400).json({
-        success: false,
-        message: 'Your KYC was rejected. Please submit new documents and try again.'
-      });
-    }
-
-    // If KYC is verified, upgrade to host
-    if (user.kyc && user.kyc.status === 'verified') {
-      user.role = 'host';
-      await user.save();
-
-      // Create notification for user
-      await Notification.create({
-        user: user._id,
-        type: 'system',
-        title: 'Welcome to Hosting!',
-        message: 'Congratulations! You are now a host. You can start creating listings and services.',
-        metadata: { newRole: 'host' }
-      });
-
-      res.status(200).json({
-        success: true,
-        message: 'Successfully upgraded to host role',
-        data: { user }
-      });
-    } else {
-      res.status(400).json({
-        success: false,
-        message: 'KYC verification required before becoming a host'
-      });
-    }
+    res.status(200).json({
+      success: true,
+      message: 'Successfully upgraded to host role. Complete KYC to publish listings.',
+      data: { 
+        user,
+        kycRequired: true,
+        kycDeadline: user.kyc.deadline
+      }
+    });
   } catch (error) {
     res.status(500).json({
       success: false,

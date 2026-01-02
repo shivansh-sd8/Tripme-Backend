@@ -11,8 +11,8 @@ const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
 // Configuration
-const ADMIN_EMAIL = 'admin1@tripme.com';
-const NEW_PASSWORD = 'Admin@123456'; // Must be at least 12 characters
+const ADMIN_EMAIL = 'sathwarakeyur990@gmail.com';
+const NEW_PASSWORD = 'Admin@1234567'; // Must be at least 12 characters
 const ADMIN_NAME = 'Admin User';
 const ADMIN_ROLE = 'super-admin'; // super-admin, admin, moderator, or support
 
@@ -22,17 +22,17 @@ async function resetPassword() {
     console.log('=====================================\n');
 
     // Connect to MongoDB
-    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    // const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
     
-    if (!mongoUri) {
-      console.error('❌ MongoDB URI not found in environment variables!');
-      console.log('Please set MONGODB_URI or MONGO_URI in your .env file');
-      process.exit(1);
-    }
+    // if (!mongoUri) {
+    //   console.error('❌ MongoDB URI not found in environment variables!');
+    //   console.log('Please set MONGODB_URI or MONGO_URI in your .env file');
+    //   process.exit(1);
+    // }
 
     console.log('📡 Connecting to MongoDB...');
     // Ensure we use the correct database name (case-sensitive)
-    const mongoUriFixed = mongoUri.replace(/\/tripme$/, '/TripMe').replace(/\/tripme\?/, '/TripMe?');
+    const mongoUriFixed = "mongodb://localhost:27017/TripMe"
     await mongoose.connect(mongoUriFixed);
     console.log('✅ Connected to MongoDB\n');
 

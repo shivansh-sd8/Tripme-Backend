@@ -3,21 +3,21 @@
  * 
  * Creates an admin entry in the admins collection
  */
-
+require('dotenv').config();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-require('dotenv').config();
 
-const ADMIN_EMAIL = 'admin1@tripme.com';
-const ADMIN_PASSWORD = 'Admin@123';
-const ADMIN_NAME = 'Admin User';
+
+const ADMIN_EMAIL = 'sathwarakeyur9900@gmail.com';
+const ADMIN_PASSWORD = 'Admin@123456';
+const ADMIN_NAME = 'KEYUR';
 
 async function createAdmin() {
   try {
     console.log('👤 Create Admin Script');
     console.log('======================\n');
 
-    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    const mongoUri = "mongodb://localhost:27017/TripMe"
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB\n');
 
@@ -43,7 +43,7 @@ async function createAdmin() {
         name: ADMIN_NAME,
         email: ADMIN_EMAIL,
         password: hashedPassword,
-        role: 'admin',
+        role: 'super-admin',
         isActive: true,
         permissions: ['all'],
         createdAt: new Date(),
