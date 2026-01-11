@@ -9,7 +9,7 @@ const razorpayService = require('../services/razorpay.service');
 const { calculatePricingBreakdown, calculateTotalHours, calculateCheckoutTime, calculateNextAvailableTime, validate24HourBooking, calculateHourlyExtension, toTwoDecimals } = require('../utils/pricingUtils');
 const { calculateExtendedCheckout, getAdditionalDatesForExtension } = require('../config/pricing.config');
 const AvailabilityService = require('../services/availability.service');
-
+const mongoose = require('mongoose');
 // ========================================
 // NEW: Import AvailabilityEvent Service for flexible hourly booking with maintenance
 // If this causes issues, you can comment out this line and the related code blocks below
@@ -65,6 +65,8 @@ function formatLocalDate(date) {
 // @route   POST /api/bookings/process-payment
 // @access  Private
 const processPaymentAndCreateBooking = async (req, res) => {
+
+  let session
   try {
     console.log('🚀 ===========================================');
     console.log('🚀 processPaymentAndCreateBooking called');
@@ -106,19 +108,38 @@ const processPaymentAndCreateBooking = async (req, res) => {
     
     // Generate idempotency key if not provided
     const finalIdempotencyKey = idempotencyKey || require('crypto').randomUUID();
+    let bookingDoc;
+    let paymentDoc;
+    let bookingCheckInDateTime;
+    let bookingCheckOutDateTime;
+    let totalHours;
+    let nextAvailableTime;
+    let hostBufferTime;
+    let amount
+
+let is24HourBooking = Boolean(
+  bookingDuration === '24hour' || checkInDateTime
+);
+    session = await mongoose.startSession();
+
+   await session.withTransaction(async () => {
     
     // Check for duplicate booking with same idempotency key
     const existingBooking = await Booking.findOne({ 
       'metadata.idempotencyKey': finalIdempotencyKey,
       user: req.user._id
-    });
+    }).session(session);
     
     if (existingBooking) {
-      return res.status(409).json({ 
-        success: false, 
-        message: 'Booking with this idempotency key already exists',
-        bookingId: existingBooking._id
-      });
+      const err = new Error('IDEMPOTENCY_CONFLICT');
+      err.status = 409;
+      err.bookingId = existingBooking._id;
+      throw err;
+      // return res.status(409).json({ 
+      //   success: false, 
+      //   message: 'Booking with this idempotency key already exists',
+      //   bookingId: existingBooking._id
+      // });
     }
 
     // Determine if this is a property or service booking
@@ -131,23 +152,32 @@ const processPaymentAndCreateBooking = async (req, res) => {
     let cancellationPolicy = 'moderate';
 
     if (actualListingId && serviceId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot book both listing and service in one booking'
-      });
+      const err = new Error('Cannot book both listing and service in one booking');
+      err.status = 400;
+      throw err;
+      // return res.status(400).json({
+      //   success: false,
+      //   message: 'Cannot book both listing and service in one booking'
+      // });
     }
     if (!actualListingId && !serviceId) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'Either listingId/propertyId or serviceId is required'
-      });
+      const err = new Error('Either listingId/propertyId or serviceId is required');
+          err.status = 400;
+          throw err;
+      // return res.status(400).json({ 
+      //   success: false,
+      //   message: 'Either listingId/propertyId or serviceId is required'
+      // });
     }
 
     // Get listing or service details
     if (actualListingId) {
-      listing = await Property.findById(actualListingId);
+      listing = await Property.findById(actualListingId).session(session);
       if (!listing) {
-        return res.status(404).json({ success: false, message: 'Listing not found' });
+         const err = new Error('LISTING_NOT_FOUND');
+          err.status = 404;
+          throw err;
+        // return res.status(404).json({ success: false, message: 'Listing not found' });
       }
       host = await User.findById(listing.host);
       bookingType = 'property';
@@ -156,7 +186,10 @@ const processPaymentAndCreateBooking = async (req, res) => {
     } else {
       service = await Service.findById(serviceId);
       if (!service) {
-        return res.status(404).json({ success: false, message: 'Service not found' });
+        const err = new Error('Service not found');
+          err.status = 404;
+          throw err;
+        // return res.status(404).json({ success: false, message: 'Service not found' });
       }
       host = await User.findById(service.provider);
       bookingType = 'service';
@@ -165,7 +198,10 @@ const processPaymentAndCreateBooking = async (req, res) => {
     }
 
     if (!host) {
-      return res.status(404).json({ success: false, message: 'Host not found' });
+       const err = new Error('Host not found');
+          err.status = 404;
+          throw err;
+      // return res.status(404).json({ success: false, message: 'Host not found' });
     }
     
     // Security validation for booking parameters
@@ -180,11 +216,11 @@ const processPaymentAndCreateBooking = async (req, res) => {
     
     if (!bookingValidation.isValid) {
       console.error('❌ Booking validation failed:', bookingValidation.errors);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid booking parameters',
-        errors: bookingValidation.errors
-      });
+       const err = new Error('Invalid booking parameters');
+          err.status = 400;
+          err.errors = bookingValidation.errors;
+          throw err;
+     
     }
     console.log('✅ Booking parameters validated');
     
@@ -206,13 +242,20 @@ const processPaymentAndCreateBooking = async (req, res) => {
       });
       
       if (!amountVerification.isValid) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Payment amount verification failed',
-          errors: amountVerification.errors,
-          expectedAmount: amountVerification.expectedAmount,
-          actualAmount: amountVerification.actualAmount
-        });
+        const err = new Error("Payment amount verification failed");
+        err.status = 400;
+        err.errors = amountVerification.errors;
+        err.expectedAmount =amountVerification.expectedAmount;
+        err.actualAmount = amountVerification.actualAmount;
+        throw err;
+
+        // return res.status(400).json({ 
+        //   success: false, 
+        //   message: 'Payment amount verification failed',
+        //   errors: amountVerification.errors,
+        //   expectedAmount: amountVerification.expectedAmount,
+        //   actualAmount: amountVerification.actualAmount
+        // });
       }
     } else if (paymentData && paymentData.razorpayOrderId) {
       // For Razorpay, we verify signature instead of amount (amount verification happens via Razorpay API)
@@ -220,7 +263,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
     }
 
     // Determine if this is a 24-hour booking
-    const is24HourBooking = bookingDuration === '24hour' || checkInDateTime;
+    is24HourBooking = bookingDuration === '24hour' || checkInDateTime;
     
     // Calculate pricing using centralized pricing system
     let pricingParams = {
@@ -240,7 +283,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
     if (bookingType === 'property') {
       if (is24HourBooking) {
         // 24-hour booking logic
-        const totalHours = calculateTotalHours(24, extensionHours || 0);
+        totalHours = calculateTotalHours(24, extensionHours || 0);
         const checkOutDateTime = calculateCheckoutTime(checkInDateTime, totalHours);
         
         // Validate 24-hour booking parameters
@@ -252,11 +295,15 @@ const processPaymentAndCreateBooking = async (req, res) => {
         });
 
         if (!validation.isValid) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Invalid 24-hour booking parameters',
-            errors: validation.errors
-          });
+          const err = new Error("Invalid 24-hour booking parameters");
+          err.errors = validation.errors;
+          err.status = 400;
+          throw err;
+          // return res.status(400).json({ 
+          //   success: false, 
+          //   message: 'Invalid 24-hour booking parameters',
+          //   errors: validation.errors
+          // });
         }
 
         // Check availability for 24-hour booking
@@ -267,10 +314,13 @@ const processPaymentAndCreateBooking = async (req, res) => {
         );
         
         if (!isAvailable) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Time slot not available for 24-hour booking' 
-          });
+          const err = new Error("Time slot not available for 24-hour booking");
+          err.status = 400;
+          throw err;
+          // return res.status(400).json({ 
+          //   success: false, 
+          //   message: 'Time slot not available for 24-hour booking' 
+          // });
         }
 
         // Set 24-hour pricing parameters
@@ -330,7 +380,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
         isActive: true,
         validFrom: { $lte: new Date() },
         validTo: { $gte: new Date() }
-      });
+      }).session(session);
       if (coupon) {
         const hasUsed = coupon.usedBy?.some(usage => usage.user.toString() === req.user._id.toString());
         if (!hasUsed) {
@@ -350,7 +400,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
           couponApplied = coupon._id;
           coupon.usedCount += 1;
           coupon.usedBy.push({ user: req.user._id, usedAt: new Date() });
-          await coupon.save();
+          await coupon.save({session});
         }
       }
     }
@@ -376,11 +426,11 @@ const processPaymentAndCreateBooking = async (req, res) => {
     // Handle checkout time calculation based on booking type
     let finalCheckOut = checkOutDateObj;
     let finalCheckOutTime = checkOutTime || (bookingType === 'property' ? (listing.checkOutTime || '10:00') : undefined);
-    let bookingCheckInDateTime = checkInDateObj;
-    let bookingCheckOutDateTime = finalCheckOut;
+        bookingCheckInDateTime = checkInDateObj;
+        bookingCheckOutDateTime = finalCheckOut;
     let totalHours = 24;
-    let hostBufferTime = 2;
-    let nextAvailableTime = null;
+        hostBufferTime = 2;
+        nextAvailableTime = null;
     
     if (is24HourBooking) {
       // 24-hour booking checkout calculation
@@ -445,7 +495,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
     }
 
     // Step 1: Create booking first (temporary, will be updated after payment)
-    const booking = await Booking.create({
+    const booking = await Booking.create([{
       user: req.user._id,
       host: host._id,
       listing: bookingType === 'property' ? actualListingId : undefined,
@@ -514,7 +564,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
         totalHours: is24HourBooking ? totalHours : undefined,
         extensionHours: is24HourBooking ? extensionHours : undefined
       }
-    });
+    }],{session});
+    bookingDoc = booking[0];
 
     // Step 2: Create payment with booking reference
     // Verify Razorpay payment if payment data is provided
@@ -535,10 +586,12 @@ const processPaymentAndCreateBooking = async (req, res) => {
       );
 
       if (!isPaymentVerified) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid payment signature. Payment verification failed.'
-        });
+        const err = new Error("Invalid payment signature. Payment verification failed.");
+        err.status = 400;
+        // return res.status(400).json({
+        //   success: false,
+        //   message: 'Invalid payment signature. Payment verification failed.'
+        // });
       }
 
       razorpayOrderId = paymentData.razorpayOrderId;
@@ -551,11 +604,15 @@ const processPaymentAndCreateBooking = async (req, res) => {
         console.log('✅ Razorpay payment verified:', razorpayPaymentDetails);
       } catch (razorpayError) {
         console.error('❌ Error fetching Razorpay payment details:', razorpayError);
-        return res.status(400).json({
-          success: false,
-          message: 'Failed to verify payment with Razorpay',
-          error: razorpayError.message
-        });
+        const err = new Error("Failed to verify payment with Razorpay");
+        err.status = 400;
+        err.error = razorpayError.message;
+        throw err;
+        // return res.status(400).json({
+        //   success: false,
+        //   message: 'Failed to verify payment with Razorpay',
+        //   error: razorpayError.message
+        // });
       }
     }
 
@@ -574,8 +631,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
     const invoiceId = `INV_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const receiptId = `RCP_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    const payment = new Payment({
-      booking: booking._id,
+    const payment = await Payment.create([{
+      booking: bookingDoc._id,
       user: req.user._id,
       host: host._id,
       amount: totalAmount,
@@ -657,21 +714,22 @@ const processPaymentAndCreateBooking = async (req, res) => {
         propertyId: actualListingId,
         serviceId: serviceId
       }
-    });
+    }],{session});
+    paymentDoc = payment[0];
 
-    await payment.save();
+    // await payment.save();
 
     // Step 3: Process payment (simulate success for now)
     // TODO: Replace with real payment gateway verification
-    payment.status = 'completed';
-    payment.processedAt = new Date();
-    await payment.save();
+    paymentDoc.status = 'completed';
+    paymentDoc.processedAt = new Date();
+    await paymentDoc.save({session});
 
     // Step 4: Update booking with payment reference but keep as pending for host approval
-    booking.payment = payment._id;
-    booking.status = 'pending'; // Keep pending until host approves
-    booking.paymentStatus = 'paid'; // Payment is successful but booking needs host approval
-    await booking.save();
+    bookingDoc.payment = paymentDoc._id;
+    bookingDoc.status = 'pending'; // Keep pending until host approves
+    bookingDoc.paymentStatus = 'paid'; // Payment is successful but booking needs host approval
+    await bookingDoc.save({session});
 
     // Step 4.5: Block availability for the booking dates
     if (bookingType === 'property' && actualListingId) {
@@ -684,57 +742,19 @@ const processPaymentAndCreateBooking = async (req, res) => {
             actualListingId,
             bookingCheckInDateTime,
             bookingCheckOutDateTime,
-            booking._id
+            bookingDoc._id
           );
           
           console.log(`✅ Successfully blocked 24-hour time slot: ${bookingCheckInDateTime.toISOString()} to ${bookingCheckOutDateTime.toISOString()}`);
         } else if (checkIn && finalCheckOut) {
-          // Block date-based availability for regular booking
-          // console.log('🔒 Blocking property dates for booking...');
-          // ////////////////////////////////////////////////////////////////////////
-          // // Generate array of dates to block
-          // // FIXED: Use UTC date extraction to avoid timezone issues
-          // // Extract YYYY-MM-DD directly from ISO strings to avoid timezone shifts
-          // const checkInDate = new Date(checkIn);
-          // const checkOutDate = new Date(finalCheckOut);
           
-          // // Get date strings in YYYY-MM-DD format (UTC)
-          // const startDateStr = checkInDate.toISOString().split('T')[0];
-          // const endDateStr = checkOutDate.toISOString().split('T')[0];
-          
-          // const datesToBlock = [];
-          
-          // console.log('📅 Date blocking calculation:', {
-          //   checkIn: checkIn,
-          //   finalCheckOut: finalCheckOut,
-          //   startDateStr: startDateStr,
-          //   endDateStr: endDateStr,
-          //   hourlyExtension: hourlyExtension?.hours || 'none'
-          // });
-          
-          // // Generate all dates from check-in to check-out (inclusive)
-          // let currentDate = new Date(startDateStr + 'T00:00:00.000Z');
-          // const endDateForLoop = new Date(endDateStr + 'T00:00:00.000Z');
-          
-          // while (currentDate <= endDateForLoop) {
-          //   const dateStr = currentDate.toISOString().split('T')[0];
-          //   datesToBlock.push(dateStr);
-          //   console.log(`  → Adding date to block: ${dateStr}`);
-          //   currentDate.setUTCDate(currentDate.getUTCDate() + 1);
-          // }
+         
           const start = normalizeToLocalMidnight(checkIn);
           const end = normalizeToLocalMidnight(checkOut); // ❗ use checkOut, NOT finalCheckOut
 
           const datesToBlock = [];
           const current = new Date(start);
-          //  console.log('📅 Date blocking calculation:', {
-          //   checkIn: checkIn,
-          //   finalCheckOut: finalCheckOut,
-          //   checkOut :checkOut,
-          //   startDateStr: startDateStr,
-          //   endDateStr: endDateStr,
-          //   hourlyExtension: hourlyExtension?.hours || 'none'
-          // });
+         
 
           while (current < end) { // ❗ NOT <=
             const dateStr = formatLocalDate(current);
@@ -776,7 +796,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
                 blockedBy: req.user._id,
                 blockedAt: new Date()
               },
-              { upsert: true, new: true }
+              { upsert: true, new: true ,session },
+              
             );
           }
           
@@ -813,7 +834,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
               bookedBy: booking._id,
               bookedAt: new Date()
             },
-            { upsert: true, new: true }
+            { upsert: true, new: true,session },
+           
           );
           
           console.log(`✅ Checkout date ${checkoutDateStr} marked as partially-available`);
@@ -843,15 +865,15 @@ const processPaymentAndCreateBooking = async (req, res) => {
             checkIn: new Date(checkIn),
             checkOut: actualCheckOut,
             maintenanceHours: maintenanceHours
-          });
+          },{session});
           
           if (eventResult.success) {
             console.log(`✅ Created ${eventResult.events.length} availability events`);
             console.log(`⏰ Next available time: ${eventResult.nextAvailableTime.toISOString()}`);
             
             // Update booking with next available time
-            booking.nextAvailableTime = eventResult.nextAvailableTime;
-            await booking.save();
+            bookingDoc.nextAvailableTime = eventResult.nextAvailableTime;
+            await bookingDoc.save();
           }
         } catch (eventError) {
           console.error('⚠️ Error creating availability events:', eventError);
@@ -917,14 +939,16 @@ const processPaymentAndCreateBooking = async (req, res) => {
             $set: {
               status: 'booked',
               reason: 'Confirmed booking',
-              bookedBy: booking._id,
+              bookedBy: bookingDoc._id,
               bookedAt: new Date()
             },
             $unset: {
               blockedBy: 1,
               blockedAt: 1
             }
-          }
+          },
+           { session }
+          
         );
         
         console.log(`✅ Successfully updated ${updateResult.modifiedCount} dates from "blocked" to "booked"`);
@@ -935,7 +959,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
             property: actualListingId,
             date: { $in: datesToUpdate },
             status: 'blocked'
-          });
+          },{session});
           console.log(`⚠️ Found ${existingBlocked.length} blocked dates but updated 0. Dates in DB:`, 
             existingBlocked.map(a => ({ date: a.date, status: a.status })));
           
@@ -963,7 +987,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
                 blockedBy: 1,
                 blockedAt: 1
               }
-            }
+            },
+            {session}
           );
           console.log(`🔄 Alternative query updated ${alternativeResult.modifiedCount} dates`);
         }
@@ -973,7 +998,7 @@ const processPaymentAndCreateBooking = async (req, res) => {
       }
       // ========================================
     }
-
+     
     // Step 5: Create notification for host
     await Notification.create({
       user: host._id,
@@ -982,84 +1007,88 @@ const processPaymentAndCreateBooking = async (req, res) => {
       message: `You have a new booking request from ${req.user.name}. Please review and accept or decline.`,
       relatedEntity: {
         type: 'Booking',
-        id: booking._id
+        id: bookingDoc._id
       }
     });
+
+    
 
     // Step 6: Send confirmation emails
     try {
       // Send confirmation email to user
       await sendBookingConfirmationEmail(req.user.email, req.user.name, {
-        bookingId: booking._id,
+        bookingId: bookingDoc._id,
         propertyName: listing?.title || service?.title,
-        checkIn: booking.checkIn ? new Date(booking.checkIn).toLocaleDateString('en-US', {
+        checkIn: bookingDoc.checkIn ? new Date(bookingDoc.checkIn).toLocaleDateString('en-US', {
           year: 'numeric',
           month: 'long',
           day: 'numeric'
-        }) : new Date(booking.timeSlot?.startTime).toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }),
-        checkOut: booking.checkOut ? new Date(booking.checkOut).toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }) : new Date(booking.timeSlot?.endTime).toLocaleDateString('en-US', {
+        }) : new Date(bookingDoc.timeSlot?.startTime).toLocaleDateString('en-US', {
           year: 'numeric',
           month: 'long',
           day: 'numeric'
         }),
-        checkInTime: booking.checkInTime,
-        checkOutTime: booking.checkOutTime,
-        hourlyExtension: booking.hourlyExtension?.hours,
-        guests: `${booking.guests.adults} adults${booking.guests.children > 0 ? `, ${booking.guests.children} children` : ''}${booking.guests.infants > 0 ? `, ${booking.guests.infants} infants` : ''}`,
-        totalAmount: booking.totalAmount.toLocaleString(),
-        currency: booking.currency,
+        checkOut: bookingDoc.checkOut ? new Date(bookingDoc.checkOut).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }) : new Date(bookingDoc.timeSlot?.endTime).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        checkInTime: bookingDoc.checkInTime,
+        checkOutTime: bookingDoc.checkOutTime,
+        hourlyExtension: bookingDoc.hourlyExtension?.hours,
+        guests: `${bookingDoc.guests.adults} adults${bookingDoc.guests.children > 0 ? `, ${bookingDoc.guests.children} children` : ''}${bookingDoc.guests.infants > 0 ? `, ${bookingDoc.guests.infants} infants` : ''}`,
+        totalAmount: bookingDoc.totalAmount.toLocaleString(),
+        currency: bookingDoc.currency,
         status: 'pending' // Indicate that booking is pending host approval
       });
 
       // Send notification email to host
       await sendBookingConfirmationEmail(host.email, host.name, {
-        bookingId: booking._id,
+        bookingId: bookingDoc._id,
         guestName: req.user.name,
         propertyName: listing?.title || service?.title,
-        checkIn: booking.checkIn ? new Date(booking.checkIn).toLocaleDateString('en-US', {
+        checkIn: bookingDoc.checkIn ? new Date(bookingDoc.checkIn).toLocaleDateString('en-US', {
           year: 'numeric',
           month: 'long',
           day: 'numeric'
-        }) : new Date(booking.timeSlot?.startTime).toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }),
-        checkOut: booking.checkOut ? new Date(booking.checkOut).toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }) : new Date(booking.timeSlot?.endTime).toLocaleDateString('en-US', {
+        }) : new Date(bookingDoc.timeSlot?.startTime).toLocaleDateString('en-US', {
           year: 'numeric',
           month: 'long',
           day: 'numeric'
         }),
-        checkInTime: booking.checkInTime,
-        checkOutTime: booking.checkOutTime,
-        hourlyExtension: booking.hourlyExtension?.hours,
-        guests: `${booking.guests.adults} adults${booking.guests.children > 0 ? `, ${booking.guests.children} children` : ''}${booking.guests.infants > 0 ? `, ${booking.guests.infants} infants` : ''}`,
-        totalAmount: booking.totalAmount.toLocaleString(),
-        currency: booking.currency
+        checkOut: bookingDoc.checkOut ? new Date(bookingDoc.checkOut).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }) : new Date(bookingDoc.timeSlot?.endTime).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        checkInTime: bookingDoc.checkInTime,
+        checkOutTime: bookingDoc.checkOutTime,
+        hourlyExtension: bookingDoc.hourlyExtension?.hours,
+        guests: `${bookingDoc.guests.adults} adults${bookingDoc.guests.children > 0 ? `, ${bookingDoc.guests.children} children` : ''}${bookingDoc.guests.infants > 0 ? `, ${bookingDoc.guests.infants} infants` : ''}`,
+        totalAmount: bookingDoc.totalAmount.toLocaleString(),
+        currency: bookingDoc.currency
       });
     } catch (emailError) {
       console.error('Email sending failed:', emailError);
       // Don't fail the booking if email fails
-    }
-
+    } 
+    amount = totalAmount;
+});
+   
     res.status(201).json({
       success: true,
       message: is24HourBooking ? '24-hour booking created and payment processed successfully' : 'Booking request created and payment processed successfully',
       data: { 
-        booking,
-        payment,
+        bookingDoc,
+        paymentDoc,
         // 24-hour booking specific data
         ...(is24HourBooking && {
           checkInDateTime: bookingCheckInDateTime,
@@ -1070,8 +1099,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
           hostBufferTime: hostBufferTime
         }),
         message: is24HourBooking 
-          ? `24-hour booking confirmed! Payment of ₹${totalAmount} processed successfully. Check-in: ${bookingCheckInDateTime.toLocaleString()}, Check-out: ${bookingCheckOutDateTime.toLocaleString()}.`
-          : `Booking request submitted! Payment of ₹${totalAmount} processed successfully. The host will review your request and confirm within 24 hours.`
+          ? `24-hour booking confirmed! Payment of ₹${amount} processed successfully. Check-in: ${bookingCheckInDateTime.toLocaleString()}, Check-out: ${bookingCheckOutDateTime.toLocaleString()}.`
+          : `Booking request submitted! Payment of ₹${amount} processed successfully. The host will review your request and confirm within 24 hours.`
       }
     });
 
@@ -1091,12 +1120,30 @@ const processPaymentAndCreateBooking = async (req, res) => {
         errors: error.errors || [error.message]
       });
     }
+     if (error.message === 'IDEMPOTENCY_CONFLICT') {
+    return res.status(409).json({
+      success: false,
+      message: 'Booking with this idempotency key already exists',
+      bookingId: error.bookingId
+    });
+  }
+    if (error.status === 400 || error.status === 404) {
+    return res.status(error.status).json({
+      success: false,
+      message: error.message,
+      errors: error.errors
+    });
+  }
+
     
     res.status(500).json({
       success: false,
       message: 'Failed to process payment and create booking',
       error: error.message
     });
+  }
+  finally {
+     if (session) await session.endSession();
   }
 };
 
@@ -1148,7 +1195,7 @@ const createBooking = async (req, res) => {
       if (!listing) {
         return res.status(404).json({ success: false, message: 'Listing not found' });
       }
-      host = await User.findById(listing.host);
+      host = await User.findById(listing.host).session(session);
       bookingType = 'property';
       currency = listing.pricing.currency || 'INR';
       cancellationPolicy = listing.cancellationPolicy || 'moderate';
