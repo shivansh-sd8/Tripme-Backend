@@ -16,7 +16,7 @@ const submitKYC = async (req, res) => {
       addressProofImage,
       selfie
     } = req.body;
-
+    console.log(req.body);
     const user = await User.findById(req.user.id);
 
     if (!user) {
@@ -130,6 +130,7 @@ const submitKYC = async (req, res) => {
       }
     });
   } catch (error) {
+    console.log(error);
     res.status(500).json({
       success: false,
       message: 'Error submitting KYC',
@@ -301,7 +302,7 @@ const getKYCRequirements = async (req, res) => {
           description: 'Recent bank statement with address (not older than 3 months)'
         },
         {
-          type: 'rental-agreement',
+          type: 'rent-agreement',
           name: 'Rental Agreement',
           description: 'Current rental or lease agreement'
         },
@@ -312,14 +313,19 @@ const getKYCRequirements = async (req, res) => {
         },
         {
           type: 'aadhar-address',
-          name: 'Aadhar Card (Address)',
+          name: 'Aadhar Card',
           description: 'Aadhar card showing current address'
         },
         {
           type: 'voter-id-address',
-          name: 'Voter ID (Address)',
+          name: 'Voter ID Card',
           description: 'Voter ID card showing current address'
-        }
+        },
+         {
+          type: 'passport',
+          name: 'Passport',
+          description: 'Valid passport with current address'
+        },
       ],
       selfie: {
         description: 'Clear selfie photo holding your ID document',

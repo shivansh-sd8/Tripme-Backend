@@ -4,6 +4,7 @@ const router = express.Router();
 const userController = require('../controllers/user.controller');
 const { protect } = require('../middlewares/auth.middleware');
 const AuthorizationMiddleware = require('../middlewares/authorization.middleware');
+const hostController = require('../controllers/host.controller');
 
 // Protected routes (require authentication)
 router.use(protect);
@@ -17,5 +18,7 @@ router.post('/profile/image', (req, res) => {
   // TODO: Implement image upload
   res.status(501).json({ success: false, message: 'Image upload not implemented yet' });
 });
+
+// router.get('/:id', hostController.getHostProfile);
 
 module.exports = router; 
