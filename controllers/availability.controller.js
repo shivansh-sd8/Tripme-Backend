@@ -2207,6 +2207,9 @@ const checkTimeSlotAvailability = async (req, res) => {
             checkInTime: checkInDate.toISOString(),
             checkInAfterMaintenance: checkInDate >= maintenanceEndTime
           });
+
+
+          console.log("checkindate and end maintaince time", checkInDate, maintenanceEndTime);
           
           // If check-in is after maintenance end, this slot is available (ignore the conflict)
           if (checkInDate >= maintenanceEndTime) {
@@ -2220,9 +2223,11 @@ const checkTimeSlotAvailability = async (req, res) => {
       return true; // Count as conflict
     });
 
+    console.log("filtered daily availability:", filteredDailyAvailability);
+
     // Only count dates with blocking statuses as conflicts (exclude 'available' status)
     const blockingDates = filteredDailyAvailability.filter(slot => 
-      ['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold'].includes(slot.status)
+      ['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold','partially-available'].includes(slot.status)
     );
     
     console.log("blocking dates", blockingDates);
