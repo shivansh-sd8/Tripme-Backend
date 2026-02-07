@@ -354,6 +354,7 @@ const canAccessReview = async (req, res, next) => {
 const canAccessWishlist = async (req, res, next) => {
   try {
     const wishlistId = req.params.wishlistId || req.params.id;
+    console.log("authmid",wishlistId);
     if (!wishlistId) {
       return res.status(400).json({
         success: false,

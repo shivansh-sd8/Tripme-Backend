@@ -238,6 +238,7 @@ app.use('/api/support', require('./routes/support.routes'));
 app.use('/api/upload', require('./routes/upload.routes'));
 app.use('/api/availability', require('./routes/availability.routes'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
+app.use('/api/email-subscription',require('./routes/emailSubscription.routes'));
 // Hourly booking routes moved to main booking routes
 
 // Note: Frontend is deployed separately

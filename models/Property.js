@@ -228,7 +228,7 @@ const propertySchema = new mongoose.Schema({
 
   amenities: [{
     type: String,
-    enum: ['wifi', 'tv', 'kitchen', 'washer', 'dryer', 'ac', 'heating', 'workspace', 'pool', 'hot-tub', 'parking', 'gym', 'breakfast', 'smoke-alarm', 'carbon-monoxide-alarm', 'first-aid-kit', 'fire-extinguisher', 'essentials', 'fireplace']
+    enum: ['wifi', 'tv', 'kitchen', 'washer', 'dryer', 'ac', 'heating', 'workspace', 'pool', 'hot-tub', 'parking', 'gym', 'breakfast', 'smoke-alarm', 'carbon-monoxide-alarm', 'first-aid-kit', 'fire-extinguisher', 'essentials', 'fireplace' ,'security']
   }],
   features: [{
     type: String,
