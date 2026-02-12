@@ -19,7 +19,7 @@ const serviceSchema = new mongoose.Schema({
   },
   serviceType: {
     type: String,
-    enum: ['tour-guide', 'car-rental', 'wellness', 'chef', 'photographer', 'hairdresser', 'yoga-teacher', 'transportation', 'other'],
+    enum: ['tour-guide', 'transport', 'fitness', 'chef', 'photographer', 'hairdresser', 'yoga-teacher', 'transportation', 'other'],
     required: true
   },
   duration: {

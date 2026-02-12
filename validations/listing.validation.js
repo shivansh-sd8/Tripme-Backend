@@ -311,12 +311,30 @@ const validateListing = (req, res, next) => {
       .messages({
         'array.max': 'Cannot exceed 50 features'
       }),
-    houseRules: Joi.array()
-      .items(Joi.string())
-      .max(20)
-      .messages({
-        'array.max': 'Cannot exceed 20 house rules'
-      }),
+    // houseRules: Joi.array()
+    //   .items(Joi.string())
+    //   .max(20)
+    //   .messages({
+    //     'array.max': 'Cannot exceed 20 house rules'
+    //   }),
+houseRules: Joi.object({
+  common: Joi.array()
+    .items(Joi.string())
+    .max(20)
+    .optional()
+    .messages({
+      'array.max': 'Cannot exceed 20 common house rules'
+    }),
+  additional: Joi.object()
+    .optional()
+    .messages({
+      'object.base': 'Additional house rules must be an object'
+    })
+}).optional()
+.messages({
+  'object.base': 'House rules must be an object'
+}),
+
     checkInTime: Joi.string()
       .pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/)
       .default('15:00')
@@ -628,19 +646,37 @@ const validateListingUpdate = (req, res, next) => {
         })
     }).optional(),
     amenities: Joi.array()
-      .items(Joi.string().valid('wifi', 'tv', 'kitchen', 'washer', 'dryer', 'ac', 'heating', 'workspace', 'pool', 'hot-tub', 'parking', 'gym', 'breakfast', 'smoke-alarm', 'carbon-monoxide-alarm', 'first-aid-kit', 'fire-extinguisher', 'essentials'))
+      .items(Joi.string().valid('wifi', 'tv', 'kitchen', 'washer', 'dryer', 'ac', 'heating', 'workspace', 'pool', 'hot-tub', 'parking', 'gym', 'breakfast', 'smoke-alarm', 'carbon-monoxide-alarm', 'first-aid-kit', 'fire-extinguisher', 'essentials' ,'security'))
       .max(50)
       .optional()
       .messages({
         'array.max': 'Cannot exceed 50 amenities'
       }),
-    houseRules: Joi.array()
-      .items(Joi.string().valid('no-smoking', 'no-pets', 'no-parties', 'no-loud-music', 'no-shoes', 'no-unregistered-guests'))
-      .max(20)
-      .optional()
-      .messages({
-        'array.max': 'Cannot exceed 20 house rules'
-      }),
+    // houseRules: Joi.array()
+    //   .items(Joi.string().valid('no-smoking', 'no-pets', 'no-parties', 'no-loud-music', 'no-shoes', 'no-unregistered-guests'))
+    //   .max(20)
+    //   .optional()
+    //   .messages({
+    //     'array.max': 'Cannot exceed 20 house rules'
+    //   }),
+
+    houseRules: Joi.object({
+  common: Joi.array()
+    .items(Joi.string())
+    .max(20)
+    .optional()
+    .messages({
+      'array.max': 'Cannot exceed 20 common house rules'
+    }),
+  additional: Joi.object()
+    .optional()
+    .messages({
+      'object.base': 'Additional house rules must be an object'
+    })
+}).optional()
+.messages({
+  'object.base': 'House rules must be an object'
+}),
     features: Joi.array()
       .items(Joi.string().valid('ocean-view', 'mountain-view', 'city-view', 'garden', 'balcony', 'terrace', 'fireplace', 'elevator', 'wheelchair-accessible', 'pet-friendly', 'smoking-allowed', 'long-term-stays'))
       .max(20)
@@ -671,17 +707,12 @@ const validateListingUpdate = (req, res, next) => {
       .messages({
         'array.max': 'Cannot exceed 20 images'
       }),
-    availability: Joi.object({
+    bookingSettings: Joi.object({
       instantBookable: Joi.boolean().optional(),
       minStay: Joi.number().min(1).max(365).optional(),
       maxStay: Joi.number().min(1).max(365).optional(),
       advanceBookingDays: Joi.number().min(0).max(365).optional(),
-      cancellationPolicy: Joi.string()
-        .valid('flexible', 'moderate', 'strict', 'super_strict')
-        .optional()
-        .messages({
-          'any.only': 'Cancellation policy must be one of: flexible, moderate, strict, super_strict'
-        })
+      
     }).optional(),
     cancellationPolicy: Joi.string()
       .valid('flexible', 'moderate', 'strict', 'super-strict')
