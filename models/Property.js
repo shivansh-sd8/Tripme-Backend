@@ -185,10 +185,20 @@ const propertySchema = new mongoose.Schema({
       }
     }
   },
-  houseRules: [{
-    type: String,
-    enum: ['no-smoking', 'no-pets', 'no-parties', 'no-loud-music', 'no-shoes', 'no-unregistered-guests']
+  // houseRules: [{
+  //   type: String,
+  //   // enum: ['no-smoking', 'no-pets', 'no-parties',  'no-unregistered-guests']
+  // }],
+  houseRules: {
+  common: [{
+    type: String
   }],
+  additional: {
+    type: Object,
+    default: {}
+  },
+  default: { common: [], additional: {} }
+},
   checkInTime: {
     type: String,
     default: '15:00'
@@ -228,7 +238,12 @@ const propertySchema = new mongoose.Schema({
 
   amenities: [{
     type: String,
-    enum: ['wifi', 'tv', 'kitchen', 'washer', 'dryer', 'ac', 'heating', 'workspace', 'pool', 'hot-tub', 'parking', 'gym', 'breakfast', 'smoke-alarm', 'carbon-monoxide-alarm', 'first-aid-kit', 'fire-extinguisher', 'essentials', 'fireplace' ,'security']
+    enum: ['wifi', 'tv', 'kitchen', 
+      'washer', 'dryer', 'ac', 'heating',
+       'workspace', 'pool', 'hot-tub', 'parking',
+        'gym', 'breakfast', 'smoke-alarm', 
+        'carbon-monoxide-alarm', 'first-aid-kit', 
+        'fire-extinguisher', 'essentials', 'fireplace' ,'security']
   }],
   features: [{
     type: String,
