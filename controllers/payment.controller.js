@@ -970,14 +970,22 @@ const createRazorpayOrder = async (req, res) => {
       }
     }
 
-    // Verify Razorpay is initialized
+    // Verify Razorpay is initialized, try to initialize if not
     if (!razorpayService.isInitialized()) {
-      console.error('❌ Razorpay not initialized. Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env');
-      return res.status(500).json({
-        success: false,
-        message: 'Payment gateway not configured. Please contact support.',
-        error: 'Razorpay service not initialized. Please check server logs.'
-      });
+      console.log('⚠️ Razorpay not initialized, attempting to initialize...');
+      razorpayService.initializeRazorpay();
+      
+      if (!razorpayService.isInitialized()) {
+        console.error('❌ Razorpay initialization failed. Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET env vars.');
+        console.error('   RAZORPAY_KEY_ID present:', !!process.env.RAZORPAY_KEY_ID);
+        console.error('   RAZORPAY_KEY_SECRET present:', !!process.env.RAZORPAY_KEY_SECRET);
+        return res.status(500).json({
+          success: false,
+          message: 'Payment gateway not configured. Please contact support.',
+          error: 'Razorpay service not initialized. Please check server logs.'
+        });
+      }
+      console.log('✅ Razorpay initialized on-demand successfully');
     }
 
     // Create Razorpay order
