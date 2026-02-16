@@ -228,7 +228,8 @@ app.get('/api/debug/razorpay', (req, res) => {
       keySecretPresent: !!keySecret,
       isInitialized: razorpayService.isInitialized(),
       envKeys: Object.keys(process.env).filter(k => k.includes('RAZORPAY'))
-    }
+    },
+    allEnvKeys: Object.keys(process.env).sort()
   });
 });
 
