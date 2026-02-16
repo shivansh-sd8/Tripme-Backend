@@ -7,6 +7,16 @@ const connectDB = require('./config/db');
 const app = express();
 const mongoose = require('mongoose'); // Added missing import for mongoose
 
+// HOTFIX: Manually set Razorpay env vars if they're missing
+if (!process.env.RAZORPAY_KEY_ID) {
+  console.log('⚠️ Setting RAZORPAY_KEY_ID manually as fallback');
+  process.env.RAZORPAY_KEY_ID = 'rzp_live_SA2LJtdmgs0xNs';
+}
+if (!process.env.RAZORPAY_KEY_SECRET) {
+  console.log('⚠️ Setting RAZORPAY_KEY_SECRET manually as fallback');
+  process.env.RAZORPAY_KEY_SECRET = 'v6TYt9ums4yA3tNuvVgHbG9e';
+}
+
 // Security imports
 const { createHelmet, createRateLimiters, securityConfig } = require('./config/security.config');
 const auditService = require('./services/audit.service');
