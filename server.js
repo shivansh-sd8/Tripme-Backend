@@ -215,6 +215,23 @@ app.get('/api/test', (req, res) => {
   res.json({ success: true, message: 'Server is working' });
 });
 
+// Debug Razorpay status endpoint
+app.get('/api/debug/razorpay', (req, res) => {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  
+  res.json({
+    success: true,
+    razorpay: {
+      keyIdPresent: !!keyId,
+      keyIdPrefix: keyId ? keyId.substring(0, 12) + '...' : null,
+      keySecretPresent: !!keySecret,
+      isInitialized: razorpayService.isInitialized(),
+      envKeys: Object.keys(process.env).filter(k => k.includes('RAZORPAY'))
+    }
+  });
+});
+
 // API Routes
 console.log('🔍 Loading auth routes...');
 app.use('/api/auth', require('./routes/auth.routes'));
