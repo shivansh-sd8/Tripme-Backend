@@ -68,11 +68,6 @@ const processPaymentAndCreateBooking = async (req, res) => {
 
   let session
   try {
-    console.log('🚀 ===========================================');
-    console.log('🚀 processPaymentAndCreateBooking called');
-    console.log('🚀 Request body:', JSON.stringify(req.body, null, 2));
-    console.log('🚀 ===========================================');
-    
     const {
       propertyId,
       listingId,
@@ -96,30 +91,19 @@ const processPaymentAndCreateBooking = async (req, res) => {
       bookingDuration
     } = req.body;
     
-    // DEBUG: Log received checkInTime
-    console.log('🕐 DEBUG - Received booking request:');
-    console.log('   checkInTime from frontend:', checkInTime);
-    console.log('   hourlyExtension:', hourlyExtension);
-    console.log('   checkIn:', checkIn);
-    console.log('   checkOut:', checkOut);
-    console.log('   propertyId:', propertyId);
-    console.log('   guests:', guests);
-    console.log('   paymentData:', paymentData ? 'Present' : 'Missing');
-    
     // Generate idempotency key if not provided
     const finalIdempotencyKey = idempotencyKey || require('crypto').randomUUID();
-    let bookingDoc;
-    let paymentDoc;
-    let bookingCheckInDateTime;
-    let bookingCheckOutDateTime;
-    let totalHours;
-    let nextAvailableTime;
-    let hostBufferTime;
-    let amount
+  let bookingDoc;
+  let paymentDoc;
+  let bookingCheckInDateTime;
+  let bookingCheckOutDateTime;
+  let totalHours;
+  let nextAvailableTime;
+  let hostBufferTime;
+  let amount
 
-let is24HourBooking = Boolean(
-  bookingDuration === '24hour' || checkInDateTime
-);
+  // Decide 24-hour flow strictly via bookingDuration flag to avoid misclassification when checkInDateTime is sent for daily bookings
+  let is24HourBooking = bookingDuration === '24hour';
     session = await mongoose.startSession();
 
    await session.withTransaction(async () => {
@@ -204,14 +188,20 @@ let is24HourBooking = Boolean(
       // return res.status(404).json({ success: false, message: 'Host not found' });
     }
     
+    const requested24Hour = bookingDuration === '24hour';
+    const basePriceForValidation = requested24Hour
+      ? (listing?.pricing?.basePrice24Hour || listing?.pricing?.basePrice || service?.pricing?.basePrice)
+      : (listing?.pricing?.basePrice || service?.pricing?.basePrice);
     // Security validation for booking parameters
-    console.log('🔍 Validating booking parameters...');
     const bookingValidation = require('../utils/paymentSecurity').validateBookingParameters({
       checkIn: checkIn,
       checkOut: checkOut,
+      checkInDateTime,
+      bookingDuration,
       guests: guests,
-      basePrice: listing?.pricing?.basePrice || service?.pricing?.basePrice,
-      hourlyExtension: hourlyExtension
+      basePrice: basePriceForValidation,
+      hourlyExtension: requested24Hour ? { hours: extensionHours || 0 } : hourlyExtension,
+      extensionHours: extensionHours
     });
     
     if (!bookingValidation.isValid) {
@@ -222,7 +212,6 @@ let is24HourBooking = Boolean(
           throw err;
      
     }
-    console.log('✅ Booking parameters validated');
     
     // Verify payment amount if provided (skip for Razorpay - we verify signature instead)
     if (paymentData && !paymentData.razorpayOrderId) {
@@ -259,11 +248,21 @@ let is24HourBooking = Boolean(
       }
     } else if (paymentData && paymentData.razorpayOrderId) {
       // For Razorpay, we verify signature instead of amount (amount verification happens via Razorpay API)
-      console.log('✅ Skipping amount verification for Razorpay payment - signature verification will be done');
     }
 
-    // Determine if this is a 24-hour booking
-    is24HourBooking = bookingDuration === '24hour' || checkInDateTime;
+    // Determine if this is a 24-hour booking (only via explicit flag to avoid misclassification)
+    is24HourBooking = bookingDuration === '24hour';
+
+    // Normalize incoming dates to Date objects early (needed for pricing and availability)
+    const ensureDate = (val) => {
+      if (!val) return null;
+      const d = val instanceof Date ? val : new Date(val);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const checkInDateObj = ensureDate(checkIn);
+    const checkOutDateObj = ensureDate(checkOut);
+    const checkInDateTimeObj = ensureDate(checkInDateTime);
     
     // Calculate pricing using centralized pricing system
     let pricingParams = {
@@ -282,13 +281,18 @@ let is24HourBooking = Boolean(
 
     if (bookingType === 'property') {
       if (is24HourBooking) {
+        if (!checkInDateTimeObj) {
+          const err = new Error("Check-in datetime is required for 24-hour booking");
+          err.status = 400;
+          throw err;
+        }
         // 24-hour booking logic
-        totalHours = calculateTotalHours(24, extensionHours || 0);
-        const checkOutDateTime = calculateCheckoutTime(checkInDateTime, totalHours);
+        totalHours = calculateTotalHours(23, extensionHours || 0);
+        const checkOutDateTime = calculateCheckoutTime(checkInDateTimeObj, totalHours);
         
         // Validate 24-hour booking parameters
         const validation = validate24HourBooking({
-          checkInDateTime,
+          checkInDateTime: checkInDateTimeObj,
           totalHours,
           minHours: listing.availabilitySettings?.minBookingHours || 24,
           maxHours: listing.availabilitySettings?.maxBookingHours || 168
@@ -309,7 +313,7 @@ let is24HourBooking = Boolean(
         // Check availability for 24-hour booking
         const isAvailable = await AvailabilityService.isTimeSlotAvailable(
           actualListingId, 
-          checkInDateTime, 
+          checkInDateTimeObj, 
           checkOutDateTime
         );
         
@@ -419,30 +423,30 @@ let is24HourBooking = Boolean(
       breakdown
     } = pricing;
 
-    // Normalize incoming dates to Date objects
-    const checkInDateObj = checkIn ? new Date(checkIn) : null;
-    const checkOutDateObj = checkOut ? new Date(checkOut) : null;
-
     // Handle checkout time calculation based on booking type
     let finalCheckOut = checkOutDateObj;
     let finalCheckOutTime = checkOutTime || (bookingType === 'property' ? (listing.checkOutTime || '10:00') : undefined);
         bookingCheckInDateTime = checkInDateObj;
         bookingCheckOutDateTime = finalCheckOut;
-    let totalHours = 24;
+    totalHours = 24;
         hostBufferTime = 2;
         nextAvailableTime = null;
     
     if (is24HourBooking) {
       // 24-hour booking checkout calculation
-      bookingCheckInDateTime = checkInDateTime;
-      bookingCheckOutDateTime = calculateCheckoutTime(checkInDateTime, totalHours);
+      bookingCheckInDateTime = checkInDateTimeObj;
+      bookingCheckOutDateTime = calculateCheckoutTime(checkInDateTimeObj, totalHours);
       finalCheckOut = bookingCheckOutDateTime;
+      // Align checkout time string with 24h flow (same time as check-in plus extensions)
+      const outH = bookingCheckOutDateTime.getHours().toString().padStart(2, '0');
+      const outM = bookingCheckOutDateTime.getMinutes().toString().padStart(2, '0');
+      finalCheckOutTime = `${outH}:${outM}`;
       
       // Calculate next available time (checkout + buffer time)
       hostBufferTime = listing.availabilitySettings?.hostBufferTime || 2;
       nextAvailableTime = calculateNextAvailableTime(bookingCheckOutDateTime, hostBufferTime);
       
-      console.log(`🕐 24-hour booking: Check-in ${bookingCheckInDateTime.toISOString()}, Check-out ${bookingCheckOutDateTime.toISOString()}`);
+      console.log(`🕐 24-hour booking: Check-in ${bookingCheckInDateTime?.toISOString?.() || bookingCheckInDateTime}, Check-out ${bookingCheckOutDateTime?.toISOString?.() || bookingCheckOutDateTime}`);
       console.log(`⏰ Total hours: ${totalHours}, Next available: ${nextAvailableTime.toISOString()}`);
     } else if (bookingType === 'property') {
       // NEW: Custom check-in time handling for hourly booking properties
@@ -568,30 +572,31 @@ let is24HourBooking = Boolean(
     bookingDoc = booking[0];
 
     // Step 2: Create payment with booking reference
-    // Verify Razorpay payment if payment data is provided
+    // Require and verify Razorpay payment proof for this flow
     let razorpayOrderId = null;
     let razorpayPaymentId = null;
     let razorpaySignature = null;
     let isPaymentVerified = false;
-    console.log("payment data",  paymentData.razorpayOrderId ,paymentData.razorpayPaymentId ,paymentData.razorpaySignature);
+    let razorpayPaymentDetails = null;
+
+    if (!paymentData || !paymentData.razorpayOrderId || !paymentData.razorpayPaymentId || !paymentData.razorpaySignature) {
+      const err = new Error('Razorpay payment proof is required');
+      err.status = 400;
+      throw err;
+    }
+
     if (paymentData && paymentData.razorpayOrderId && paymentData.razorpayPaymentId && paymentData.razorpaySignature) {
       // Verify payment signature
       isPaymentVerified = razorpayService.verifyPayment(
         paymentData.razorpayOrderId,
         paymentData.razorpayPaymentId,
         paymentData.razorpaySignature
-  //       razorpay_order_id,
-  // razorpay_payment_id,
-  // razorpay_signature
       );
 
       if (!isPaymentVerified) {
-        const err = new Error("Invalid payment signature. Payment verification failed.");
+        const err = new Error('Invalid payment signature. Payment verification failed.');
         err.status = 400;
-        // return res.status(400).json({
-        //   success: false,
-        //   message: 'Invalid payment signature. Payment verification failed.'
-        // });
+        throw err;
       }
 
       razorpayOrderId = paymentData.razorpayOrderId;
@@ -600,8 +605,7 @@ let is24HourBooking = Boolean(
 
       // Get payment details from Razorpay
       try {
-        const razorpayPaymentDetails = await razorpayService.getPaymentDetails(razorpayPaymentId);
-        console.log('✅ Razorpay payment verified:', razorpayPaymentDetails);
+        razorpayPaymentDetails = await razorpayService.getPaymentDetails(razorpayPaymentId);
       } catch (razorpayError) {
         console.error('❌ Error fetching Razorpay payment details:', razorpayError);
         const err = new Error("Failed to verify payment with Razorpay");
@@ -613,6 +617,40 @@ let is24HourBooking = Boolean(
         //   message: 'Failed to verify payment with Razorpay',
         //   error: razorpayError.message
         // });
+      }
+
+      const expectedAmountPaise = Math.round(Number(totalAmount) * 100);
+      const expectedCurrency = currency || 'INR';
+      const razorpayStatus = razorpayPaymentDetails?.status;
+
+      if (razorpayPaymentDetails?.order_id !== razorpayOrderId) {
+        const err = new Error('Razorpay order mismatch');
+        err.status = 400;
+        throw err;
+      }
+
+      const paidAmountPaise = Number(razorpayPaymentDetails?.amount);
+      const amountDiff = Math.abs(paidAmountPaise - expectedAmountPaise);
+      // Allow a small tolerance (₹1) to account for rounding or currency conversions
+      if (amountDiff > 100) {
+        const err = new Error('Razorpay amount mismatch');
+        err.status = 400;
+        err.expectedAmountPaise = expectedAmountPaise;
+        err.paidAmountPaise = paidAmountPaise;
+        err.amountDiffPaise = amountDiff;
+        throw err;
+      }
+
+      if (razorpayPaymentDetails?.currency !== expectedCurrency) {
+        const err = new Error('Razorpay currency mismatch');
+        err.status = 400;
+        throw err;
+      }
+
+      if (!['authorized', 'captured'].includes(razorpayStatus)) {
+        const err = new Error(`Payment status is not successful: ${razorpayStatus || 'unknown'}`);
+        err.status = 400;
+        throw err;
       }
     }
 
@@ -643,12 +681,7 @@ let is24HourBooking = Boolean(
       paymentDetails: {
         transactionId: transactionId,
         paymentGateway: 'razorpay',
-        gatewayResponse: paymentData?.razorpayPaymentDetails || {
-          status: 'success',
-          transactionId: transactionId,
-          processedAt: new Date().toISOString(),
-          gateway: 'razorpay'
-        }
+        gatewayResponse: razorpayPaymentDetails
       },
       // Razorpay specific fields
       razorpayOrderId: razorpayOrderId,
@@ -719,11 +752,16 @@ let is24HourBooking = Boolean(
 
     // await payment.save();
 
-    // Step 3: Process payment (simulate success for now)
-    // TODO: Replace with real payment gateway verification
-    paymentDoc.status = 'completed';
+    // Step 3: Finalize payment status only after verified gateway proof
+    paymentDoc.status = isPaymentVerified ? 'completed' : 'failed';
     paymentDoc.processedAt = new Date();
     await paymentDoc.save({session});
+
+    if (!isPaymentVerified) {
+      const err = new Error('Payment verification failed during booking processing');
+      err.status = 400;
+      throw err;
+    }
 
     // Step 4: Update booking with payment reference but keep as pending for host approval
     bookingDoc.payment = paymentDoc._id;
@@ -2546,16 +2584,359 @@ const calculateBookingPrice = async (req, res) => {
 // @desc    Cancel booking
 // @route   DELETE /api/bookings/:id
 // @access  Private
+// const cancelBooking = async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { reason } = req.body;
+//     // Use _id instead of id for Mongoose documents
+//     const userId = req.user._id;
+
+//     // Find the booking
+//     const booking = await Booking.findById(id)
+//       .populate('listing', 'title host cancellationPolicy pricing')
+//       .populate('host', 'name email')
+//       .populate('user', 'name email');
+
+//     if (!booking) {
+//       return res.status(404).json({
+//         success: false,
+//         message: 'Booking not found'
+//       });
+//     }
+
+//     // Check if user is authorized to cancel this booking
+//     // User can cancel if they are the booking owner OR the host
+//     const isBookingOwner = booking.user && (
+//       (typeof booking.user === 'string' && booking.user === userId.toString()) ||
+//       (booking.user._id && booking.user._id.toString() === userId.toString())
+//     );
+    
+//     const isHost = booking.host && (
+//       (typeof booking.host === 'string' && booking.host === userId.toString()) ||
+//       (booking.host._id && booking.host._id.toString() === userId.toString())
+//     );
+    
+//     // Add debug logging
+//     console.log('🔍 Authorization check for booking cancellation:');
+//     console.log('🔍 Current user ID:', userId.toString());
+//     console.log('🔍 Booking user ID:', booking.user ? (typeof booking.user === 'string' ? booking.user : booking.user._id?.toString()) : 'null');
+//     console.log('🔍 Booking host ID:', booking.host ? (typeof booking.host === 'string' ? booking.host : booking.host._id?.toString()) : 'null');
+//     console.log('🔍 Is booking owner:', isBookingOwner);
+//     console.log('🔍 Is host:', isHost);
+    
+//     if (!isBookingOwner && !isHost) {
+//       return res.status(403).json({
+//         success: false,
+//         message: 'You are not authorized to cancel this booking. Only the booking owner or host can cancel.',
+//         debug: {
+//           userId: userId.toString(),
+//           bookingUserId: booking.user ? (typeof booking.user === 'string' ? booking.user : booking.user._id?.toString()) : 'null',
+//           bookingHostId: booking.host ? (typeof booking.host === 'string' ? booking.host : booking.host._id?.toString()) : 'null'
+//         }
+//       });
+//     }
+
+//     // Check if booking can be cancelled
+//     if (booking.status === 'cancelled') {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Booking is already cancelled'
+//       });
+//     }
+
+//     if (booking.status === 'completed') {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Cannot cancel a completed booking'
+//       });
+//     }
+
+//     // Determine refund type and reason based on booking status and who is cancelling
+//     let refundType = 'partial';
+//     let refundReason = 'cancellation';
+    
+//     // If booking is pending (before host approval), always give full refund
+//     if (booking.status === 'pending') {
+//       refundType = 'full';
+//       refundReason = 'cancellation'; // User cancellation before host approval
+//     } else if (isHost) {
+//       // Host is cancelling - always full refund
+//       refundType = 'full';
+//       refundReason = 'host_cancel';
+//         } else {
+//       // User is cancelling confirmed booking - use cancellation policy
+//       refundType = 'partial'; // RefundService will calculate based on policy
+//       refundReason = 'cancellation';
+//     }
+
+//     // Process refund using RefundService BEFORE updating booking status
+//     // let refund = null;
+//     // try {
+//     //   if (isHost) {
+//     //     console.log('🔄 ===========================================');
+//     //     console.log('🔄 HOST CANCELLATION - REFUND PROCESSING');
+//     //     console.log('🔄 ===========================================');
+//     //     console.log('📋 Booking ID:', booking._id);
+//     //     console.log('👤 Guest:', booking.user?.name || booking.user?.email || 'Unknown');
+//     //     console.log('🏠 Host:', booking.host?.name || booking.host?.email || 'Unknown');
+//     //     console.log('💰 Booking Amount:', booking.totalAmount, booking.currency || 'INR');
+//     //     console.log('📅 Booking Status:', booking.status);
+//     //     console.log('💳 Payment ID:', booking.payment?._id);
+//     //     console.log('💳 Razorpay Payment ID:', booking.payment?.razorpayPaymentId || 'N/A');
+//     //     console.log('🔄 ===========================================');
+//     //   }
+      
+//     //   refund = await RefundService.processRefund(
+//     //     booking._id,
+//     //     refundReason,
+//     //     refundType,
+//     //     {
+//     //       userNotes: reason || (isHost ? 'Cancelled by host' : 'Cancelled by user'),
+//     //       adminNotes: `Cancellation - ${isHost ? 'Host cancelled' : 'User cancelled'} ${booking.status === 'pending' ? 'before approval' : 'after confirmation'}`
+//     //     }
+//     //   );
+      
+//     //   if (isHost) {
+//     //     console.log('✅ ===========================================');
+//     //     console.log('✅ REFUND PROCESSED SUCCESSFULLY');
+//     //     console.log('✅ ===========================================');
+//     //     console.log('📋 Refund ID:', refund._id);
+//     //     console.log('📋 Refund Reference:', refund.refundReference);
+//     //     console.log('💰 Refund Amount:', refund.amount, refund.currency);
+//     //     console.log('💳 Razorpay Refund ID:', refund.razorpayRefundId || 'N/A');
+//     //     console.log('📊 Refund Status:', refund.status);
+//     //     console.log('✅ ===========================================');
+//     //   } else {
+//     //   console.log(`✅ Refund processed for cancelled booking: ${refund.refundReference}`);
+//     //   console.log(`📋 Refund stored in database with ID: ${refund._id}`);
+//     //   console.log(`💰 Refund amount: ${refund.amount}`);
+//     //   }
+//     // } catch (refundError) {
+//     //   console.error('❌ Error processing refund for cancelled booking:', refundError);
+//     //   // Continue with cancellation even if refund fails
+//     // }
+
+//     // Update booking status
+//     booking.status = 'cancelled';
+//     booking.cancellationReason = reason || 'Cancelled by user';
+//     booking.cancelledAt = new Date();
+//     booking.cancelledBy = userId;
+
+//     // Update booking with refund details
+//     if (refund) {
+//       booking.refundAmount = refund.amount;
+//       booking.refunded = refund.amount > 0;
+//       booking.refundStatus = mapRefundStatusToBooking(refund.status);
+//       booking.paymentStatus = refund.amount === booking.totalAmount ? 'refunded' : 'partially_refunded';
+//     } else {
+//       // Fallback if refund creation failed
+//       booking.refundAmount = 0;
+//       booking.refunded = false;
+//       booking.refundStatus = 'not_applicable';
+//       booking.paymentStatus = 'refunded';
+//     }
+
+//     await booking.save();
+
+//     // Release dates back to availability system
+//     if (booking.listing && booking.checkIn && booking.checkOut) {
+//       try {
+//         console.log('🔄 Releasing property dates back to availability system...');
+        
+//         // FIXED: Generate array of dates to release (normalize to midnight, include checkout date)
+//         const startDate = new Date(booking.checkIn);
+//         startDate.setHours(0, 0, 0, 0);
+//         const endDate = new Date(booking.checkOut);
+//         endDate.setHours(23, 59, 59, 999); // Include checkout date
+//         const datesToRelease = [];
+        
+//         let currentDate = new Date(startDate);
+//         while (currentDate <= endDate) {  // FIXED: Use <= instead of <
+//           const dateStr = currentDate.toISOString().split('T')[0];
+//           datesToRelease.push(dateStr);
+//           currentDate.setDate(currentDate.getDate() + 1);
+//         }
+        
+//         console.log('📅 Property dates to release:', datesToRelease);
+        
+//                         // Update availability records to mark dates as available again
+//                 const updateResult = await Availability.updateMany(
+//                   {
+//             property: booking.listing._id || booking.listing,
+//             date: { $in: datesToRelease.map(d => new Date(d)) },
+//             status: { $in: ['booked', 'blocked'] }  // FIXED: Also release blocked dates
+//                   },
+//                   {
+//                     $set: {
+//                       status: 'available',
+//                       bookedBy: null,
+//                       bookedAt: null,
+//               blockedBy: null,
+//               blockedAt: null,
+//                       reason: null
+//                     },
+//                     $unset: {
+//                       bookingId: 1
+//                     }
+//                   }
+//                 );
+        
+//         console.log(`✅ Successfully released ${updateResult.modifiedCount} property dates back to available status`);
+        
+//         // Also delete any AvailabilityEvents for this booking
+//         try {
+//           await AvailabilityEventService.deleteBookingEvents(booking._id);
+//           console.log('✅ Deleted availability events for cancelled booking');
+//         } catch (eventError) {
+//           console.error('⚠️ Error deleting availability events:', eventError);
+//         }
+        
+//       } catch (availabilityError) {
+//         console.error('⚠️ Error releasing property dates to availability system:', availabilityError);
+//         // Don't fail the cancellation if availability update fails
+//       }
+//     }
+    
+//     // Handle service booking time slot release
+//     if (booking.service && booking.timeSlot) {
+//       try {
+//         console.log('🔄 Releasing service time slot back to availability system...');
+        
+//                         // For services, we need to release the specific time slot
+//                 const timeSlotUpdate = await Availability.updateMany(
+//                   {
+//                     service: booking.service,
+//                     date: new Date(booking.timeSlot.startTime).toISOString().split('T')[0],
+//                     status: 'booked'
+//                   },
+//                   {
+//                     $set: {
+//                       status: 'available',
+//                       bookedBy: null,
+//                       bookedAt: null,
+//                       reason: null
+//                     },
+//                     $unset: {
+//                       bookingId: 1
+//                     }
+//                   }
+//                 );
+        
+//                         console.log(`✅ Successfully released service time slot back to available status (reason field cleared)`);
+        
+//       } catch (availabilityError) {
+//         console.error('⚠️ Error releasing service time slot to availability system:', availabilityError);
+//         // Don't fail the cancellation if availability update fails
+//       }
+//     }
+
+//     // Create notification for the other party
+//     const notificationData = {
+//       user: (booking.user && booking.user.toString() === userId) ? booking.host : booking.user,
+//       type: 'booking',
+//       title: 'Booking Cancelled',
+//       message: `Booking for ${booking.listing?.title || 'property'} has been cancelled`,
+//       metadata: {
+//         bookingId: booking._id,
+//         refundAmount,
+//         refundPercentage
+//       }
+//     };
+
+//     if (notificationData.user) {
+//       await Notification.create(notificationData);
+//     }
+
+//     // If there's a refund, process it
+//     if (refundAmount > 0) {
+//       // Find the payment for this booking
+//       const payment = await Payment.findOne({ booking: booking._id });
+      
+//       if (payment) {
+//         payment.status = 'refunded';
+//         payment.refundAmount = refundAmount;
+//         payment.refundedAt = new Date();
+//         await payment.save();
+//       }
+
+//       // Send refund notification email
+//       try {
+//         if (booking.user && booking.user.email) {
+//           await sendBookingCancellationEmail(
+//             booking.user.email,
+//             booking.user.name || 'User',
+//             {
+//               propertyName: booking.listing?.title || 'Property',
+//               bookingId: booking._id,
+//               refundAmount,
+//               refundPercentage,
+//               checkIn: booking.checkIn,
+//               checkOut: booking.checkOut
+//             }
+//           );
+//         }
+//       } catch (emailError) {
+//         console.error('⚠️ ===========================================');
+//         console.error('⚠️ EMAIL SENDING FAILED (Non-blocking)');
+//         console.error('⚠️ ===========================================');
+//         console.error('⚠️ Note: Refund has already been processed successfully');
+//         console.error('⚠️ Email error does not affect refund processing');
+//         console.error('⚠️ Error:', emailError.message);
+//         console.error('⚠️ ===========================================');
+//       }
+//     }
+
+//     // Prepare detailed refund information
+//     const refundInfo = {
+//       originalAmount: booking.totalAmount,
+//       refundAmount: refundAmount,
+//       refundPercentage: refundPercentage,
+//       cancellationPolicy: cancellationPolicy,
+//       policyDescription: policyDescription,
+//       timeUntilCheckIn: {
+//         days: daysUntilCheckIn,
+//         hours: Math.ceil(hoursUntilCheckIn)
+//       },
+//       refundStatus: refundAmount > 0 ? 'pending' : 'not_applicable',
+//       message: refundAmount > 0 
+//         ? `You will receive a refund of ₹${refundAmount.toFixed(2)} (${refundPercentage}% of total amount)`
+//         : 'No refund is applicable based on the cancellation policy'
+//     };
+
+//     res.status(200).json({
+//       success: true,
+//       message: 'Booking cancelled successfully',
+//       data: {
+//         booking: {
+//           _id: booking._id,
+//           status: booking.status,
+//           cancelledAt: booking.cancelledAt,
+//           cancellationReason: booking.cancellationReason
+//         },
+//         refundInfo,
+//         datesReleased: true,
+//         message: `Your booking has been cancelled. ${refundInfo.message}`
+//       }
+//     });
+//   } catch (error) {
+//     console.error('Error cancelling booking:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Error cancelling booking',
+//       error: error.message
+//     });
+//   }
+// };
+
+
 const cancelBooking = async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
-    // Use _id instead of id for Mongoose documents
     const userId = req.user._id;
 
-    // Find the booking
     const booking = await Booking.findById(id)
-      .populate('listing', 'title host cancellationPolicy pricing')
+      .populate('listing', 'title')
       .populate('host', 'name email')
       .populate('user', 'name email');
 
@@ -2566,329 +2947,151 @@ const cancelBooking = async (req, res) => {
       });
     }
 
-    // Check if user is authorized to cancel this booking
-    // User can cancel if they are the booking owner OR the host
-    const isBookingOwner = booking.user && (
-      (typeof booking.user === 'string' && booking.user === userId.toString()) ||
-      (booking.user._id && booking.user._id.toString() === userId.toString())
-    );
-    
-    const isHost = booking.host && (
-      (typeof booking.host === 'string' && booking.host === userId.toString()) ||
-      (booking.host._id && booking.host._id.toString() === userId.toString())
-    );
-    
-    // Add debug logging
-    console.log('🔍 Authorization check for booking cancellation:');
-    console.log('🔍 Current user ID:', userId.toString());
-    console.log('🔍 Booking user ID:', booking.user ? (typeof booking.user === 'string' ? booking.user : booking.user._id?.toString()) : 'null');
-    console.log('🔍 Booking host ID:', booking.host ? (typeof booking.host === 'string' ? booking.host : booking.host._id?.toString()) : 'null');
-    console.log('🔍 Is booking owner:', isBookingOwner);
-    console.log('🔍 Is host:', isHost);
-    
-    if (!isBookingOwner && !isHost) {
+    // Authorization
+    const bookingUserId = booking.user?._id?.toString() ?? booking.user?.toString();
+    const bookingHostId = booking.host?._id?.toString() ?? booking.host?.toString();
+    const isBookingOwner = bookingUserId === userId.toString();
+    const isHost = bookingHostId === userId.toString();
+    const isAdmin =
+      req.user.role === 'admin' || req.user.role === 'super-admin';
+
+    if (!isBookingOwner && !isHost && !isAdmin) {
       return res.status(403).json({
         success: false,
-        message: 'You are not authorized to cancel this booking. Only the booking owner or host can cancel.',
-        debug: {
-          userId: userId.toString(),
-          bookingUserId: booking.user ? (typeof booking.user === 'string' ? booking.user : booking.user._id?.toString()) : 'null',
-          bookingHostId: booking.host ? (typeof booking.host === 'string' ? booking.host : booking.host._id?.toString()) : 'null'
-        }
+        message: 'Not authorized to cancel this booking'
       });
     }
 
-    // Check if booking can be cancelled
+    // Status checks
     if (booking.status === 'cancelled') {
       return res.status(400).json({
         success: false,
-        message: 'Booking is already cancelled'
+        message: 'Booking already cancelled'
       });
     }
 
     if (booking.status === 'completed') {
       return res.status(400).json({
         success: false,
-        message: 'Cannot cancel a completed booking'
+        message: 'Completed booking cannot be cancelled'
       });
     }
 
-    // Determine refund type and reason based on booking status and who is cancelling
-    let refundType = 'partial';
-    let refundReason = 'cancellation';
-    
-    // If booking is pending (before host approval), always give full refund
-    if (booking.status === 'pending') {
-      refundType = 'full';
-      refundReason = 'cancellation'; // User cancellation before host approval
-    } else if (isHost) {
-      // Host is cancelling - always full refund
-      refundType = 'full';
-      refundReason = 'host_cancel';
-        } else {
-      // User is cancelling confirmed booking - use cancellation policy
-      refundType = 'partial'; // RefundService will calculate based on policy
-      refundReason = 'cancellation';
-    }
-
-    // Process refund using RefundService BEFORE updating booking status
-    let refund = null;
-    try {
-      if (isHost) {
-        console.log('🔄 ===========================================');
-        console.log('🔄 HOST CANCELLATION - REFUND PROCESSING');
-        console.log('🔄 ===========================================');
-        console.log('📋 Booking ID:', booking._id);
-        console.log('👤 Guest:', booking.user?.name || booking.user?.email || 'Unknown');
-        console.log('🏠 Host:', booking.host?.name || booking.host?.email || 'Unknown');
-        console.log('💰 Booking Amount:', booking.totalAmount, booking.currency || 'INR');
-        console.log('📅 Booking Status:', booking.status);
-        console.log('💳 Payment ID:', booking.payment?._id);
-        console.log('💳 Razorpay Payment ID:', booking.payment?.razorpayPaymentId || 'N/A');
-        console.log('🔄 ===========================================');
-      }
-      
-      refund = await RefundService.processRefund(
-        booking._id,
-        refundReason,
-        refundType,
-        {
-          userNotes: reason || (isHost ? 'Cancelled by host' : 'Cancelled by user'),
-          adminNotes: `Cancellation - ${isHost ? 'Host cancelled' : 'User cancelled'} ${booking.status === 'pending' ? 'before approval' : 'after confirmation'}`
-        }
-      );
-      
-      if (isHost) {
-        console.log('✅ ===========================================');
-        console.log('✅ REFUND PROCESSED SUCCESSFULLY');
-        console.log('✅ ===========================================');
-        console.log('📋 Refund ID:', refund._id);
-        console.log('📋 Refund Reference:', refund.refundReference);
-        console.log('💰 Refund Amount:', refund.amount, refund.currency);
-        console.log('💳 Razorpay Refund ID:', refund.razorpayRefundId || 'N/A');
-        console.log('📊 Refund Status:', refund.status);
-        console.log('✅ ===========================================');
-      } else {
-      console.log(`✅ Refund processed for cancelled booking: ${refund.refundReference}`);
-      console.log(`📋 Refund stored in database with ID: ${refund._id}`);
-      console.log(`💰 Refund amount: ${refund.amount}`);
-      }
-    } catch (refundError) {
-      console.error('❌ Error processing refund for cancelled booking:', refundError);
-      // Continue with cancellation even if refund fails
-    }
-
-    // Update booking status
+    // ✅ Cancel booking (NO REFUND HERE)
     booking.status = 'cancelled';
     booking.cancellationReason = reason || 'Cancelled by user';
     booking.cancelledAt = new Date();
     booking.cancelledBy = userId;
 
-    // Update booking with refund details
-    if (refund) {
-      booking.refundAmount = refund.amount;
-      booking.refunded = refund.amount > 0;
-      booking.refundStatus = mapRefundStatusToBooking(refund.status);
-      booking.paymentStatus = refund.amount === booking.totalAmount ? 'refunded' : 'partially_refunded';
-    } else {
-      // Fallback if refund creation failed
-      booking.refundAmount = 0;
-      booking.refunded = false;
-      booking.refundStatus = 'not_applicable';
-      booking.paymentStatus = 'refunded';
-    }
+    // 🔒 Refund handled by ADMIN later
+    booking.refundStatus = 'pending';
+    booking.refundAmount = 0;
+    booking.refunded = false;
+    booking.paymentStatus = 'cancelled';
 
     await booking.save();
 
-    // Release dates back to availability system
+    // ===============================
+    // Release property availability
+    // ===============================
     if (booking.listing && booking.checkIn && booking.checkOut) {
-      try {
-        console.log('🔄 Releasing property dates back to availability system...');
-        
-        // FIXED: Generate array of dates to release (normalize to midnight, include checkout date)
-        const startDate = new Date(booking.checkIn);
-        startDate.setHours(0, 0, 0, 0);
-        const endDate = new Date(booking.checkOut);
-        endDate.setHours(23, 59, 59, 999); // Include checkout date
-        const datesToRelease = [];
-        
-        let currentDate = new Date(startDate);
-        while (currentDate <= endDate) {  // FIXED: Use <= instead of <
-          const dateStr = currentDate.toISOString().split('T')[0];
-          datesToRelease.push(dateStr);
-          currentDate.setDate(currentDate.getDate() + 1);
-        }
-        
-        console.log('📅 Property dates to release:', datesToRelease);
-        
-                        // Update availability records to mark dates as available again
-                const updateResult = await Availability.updateMany(
-                  {
-            property: booking.listing._id || booking.listing,
-            date: { $in: datesToRelease.map(d => new Date(d)) },
-            status: { $in: ['booked', 'blocked'] }  // FIXED: Also release blocked dates
-                  },
-                  {
-                    $set: {
-                      status: 'available',
-                      bookedBy: null,
-                      bookedAt: null,
-              blockedBy: null,
-              blockedAt: null,
-                      reason: null
-                    },
-                    $unset: {
-                      bookingId: 1
-                    }
-                  }
-                );
-        
-        console.log(`✅ Successfully released ${updateResult.modifiedCount} property dates back to available status`);
-        
-        // Also delete any AvailabilityEvents for this booking
-        try {
-          await AvailabilityEventService.deleteBookingEvents(booking._id);
-          console.log('✅ Deleted availability events for cancelled booking');
-        } catch (eventError) {
-          console.error('⚠️ Error deleting availability events:', eventError);
-        }
-        
-      } catch (availabilityError) {
-        console.error('⚠️ Error releasing property dates to availability system:', availabilityError);
-        // Don't fail the cancellation if availability update fails
+      const startDate = new Date(booking.checkIn);
+      startDate.setHours(0, 0, 0, 0);
+
+      const endDate = new Date(booking.checkOut);
+      endDate.setHours(23, 59, 59, 999);
+
+      const datesToRelease = [];
+      let current = new Date(startDate);
+
+      while (current <= endDate) {
+        datesToRelease.push(new Date(current));
+        current.setDate(current.getDate() + 1);
       }
+
+      await Availability.updateMany(
+        {
+          property: booking.listing._id,
+          date: { $in: datesToRelease },
+          status: { $in: ['booked', 'blocked'] }
+        },
+        {
+          $set: {
+            status: 'available',
+            bookedBy: null,
+            bookedAt: null,
+            blockedBy: null,
+            blockedAt: null,
+            reason: null
+          },
+          $unset: { bookingId: 1 }
+        }
+      );
+
+      await AvailabilityEventService.deleteBookingEvents(booking._id);
     }
-    
-    // Handle service booking time slot release
+
+    // ===============================
+    // Release service slot (if any)
+    // ===============================
     if (booking.service && booking.timeSlot) {
-      try {
-        console.log('🔄 Releasing service time slot back to availability system...');
-        
-                        // For services, we need to release the specific time slot
-                const timeSlotUpdate = await Availability.updateMany(
-                  {
-                    service: booking.service,
-                    date: new Date(booking.timeSlot.startTime).toISOString().split('T')[0],
-                    status: 'booked'
-                  },
-                  {
-                    $set: {
-                      status: 'available',
-                      bookedBy: null,
-                      bookedAt: null,
-                      reason: null
-                    },
-                    $unset: {
-                      bookingId: 1
-                    }
-                  }
-                );
-        
-                        console.log(`✅ Successfully released service time slot back to available status (reason field cleared)`);
-        
-      } catch (availabilityError) {
-        console.error('⚠️ Error releasing service time slot to availability system:', availabilityError);
-        // Don't fail the cancellation if availability update fails
-      }
-    }
-
-    // Create notification for the other party
-    const notificationData = {
-      user: (booking.user && booking.user.toString() === userId) ? booking.host : booking.user,
-      type: 'booking',
-      title: 'Booking Cancelled',
-      message: `Booking for ${booking.listing?.title || 'property'} has been cancelled`,
-      metadata: {
-        bookingId: booking._id,
-        refundAmount,
-        refundPercentage
-      }
-    };
-
-    if (notificationData.user) {
-      await Notification.create(notificationData);
-    }
-
-    // If there's a refund, process it
-    if (refundAmount > 0) {
-      // Find the payment for this booking
-      const payment = await Payment.findOne({ booking: booking._id });
-      
-      if (payment) {
-        payment.status = 'refunded';
-        payment.refundAmount = refundAmount;
-        payment.refundedAt = new Date();
-        await payment.save();
-      }
-
-      // Send refund notification email
-      try {
-        if (booking.user && booking.user.email) {
-          await sendBookingCancellationEmail(
-            booking.user.email,
-            booking.user.name || 'User',
-            {
-              propertyName: booking.listing?.title || 'Property',
-              bookingId: booking._id,
-              refundAmount,
-              refundPercentage,
-              checkIn: booking.checkIn,
-              checkOut: booking.checkOut
-            }
-          );
+      await Availability.updateMany(
+        {
+          service: booking.service,
+          date: new Date(booking.timeSlot.startTime)
+        },
+        {
+          $set: {
+            status: 'available',
+            bookedBy: null,
+            bookedAt: null,
+            reason: null
+          },
+          $unset: { bookingId: 1 }
         }
-      } catch (emailError) {
-        console.error('⚠️ ===========================================');
-        console.error('⚠️ EMAIL SENDING FAILED (Non-blocking)');
-        console.error('⚠️ ===========================================');
-        console.error('⚠️ Note: Refund has already been processed successfully');
-        console.error('⚠️ Email error does not affect refund processing');
-        console.error('⚠️ Error:', emailError.message);
-        console.error('⚠️ ===========================================');
-      }
+      );
     }
 
-    // Prepare detailed refund information
-    const refundInfo = {
-      originalAmount: booking.totalAmount,
-      refundAmount: refundAmount,
-      refundPercentage: refundPercentage,
-      cancellationPolicy: cancellationPolicy,
-      policyDescription: policyDescription,
-      timeUntilCheckIn: {
-        days: daysUntilCheckIn,
-        hours: Math.ceil(hoursUntilCheckIn)
-      },
-      refundStatus: refundAmount > 0 ? 'pending' : 'not_applicable',
-      message: refundAmount > 0 
-        ? `You will receive a refund of ₹${refundAmount.toFixed(2)} (${refundPercentage}% of total amount)`
-        : 'No refund is applicable based on the cancellation policy'
-    };
+    // ===============================
+    // Notification
+    // ===============================
+    const notifyUser =
+      booking.user._id.toString() === userId.toString()
+        ? booking.host
+        : booking.user;
 
-    res.status(200).json({
+    if (notifyUser) {
+      await Notification.create({
+        user: notifyUser,
+        type: 'booking',
+        title: 'Booking Cancelled',
+        message: `Booking for ${booking.listing?.title || 'property'} has been cancelled`,
+        metadata: {
+          bookingId: booking._id
+        }
+      });
+    }
+
+    return res.status(200).json({
       success: true,
       message: 'Booking cancelled successfully',
       data: {
-        booking: {
-          _id: booking._id,
-          status: booking.status,
-          cancelledAt: booking.cancelledAt,
-          cancellationReason: booking.cancellationReason
-        },
-        refundInfo,
-        datesReleased: true,
-        message: `Your booking has been cancelled. ${refundInfo.message}`
+        bookingId: booking._id,
+        status: booking.status,
+        refundStatus: 'pending',
+        adminActionRequired: true
       }
     });
+
   } catch (error) {
-    console.error('Error cancelling booking:', error);
-    res.status(500).json({
+    console.error('Cancel booking error:', error);
+    return res.status(500).json({
       success: false,
-      message: 'Error cancelling booking',
-      error: error.message
+      message: 'Error cancelling booking'
     });
   }
 };
+
 
 // @desc    Get booking statistics
 // @route   GET /api/bookings/stats

@@ -2,18 +2,6 @@ const Joi = require('joi');
 
 // Create booking validation
 const validateBooking = (req, res, next) => {
-  console.log('🔍 ===========================================');
-  console.log('🔍 validateBooking middleware called');
-  console.log('🔍 Request body keys:', Object.keys(req.body));
-  console.log('🔍 paymentData present:', !!req.body.paymentData);
-  if (req.body.paymentData) {
-    console.log('🔍 paymentData keys:', Object.keys(req.body.paymentData));
-    console.log('🔍 paymentData.razorpayOrderId:', req.body.paymentData.razorpayOrderId);
-    console.log('🔍 paymentData.razorpayPaymentId:', req.body.paymentData.razorpayPaymentId);
-    console.log('🔍 paymentData.razorpaySignature:', req.body.paymentData.razorpaySignature ? 'present' : 'missing');
-  }
-  console.log('🔍 ===========================================');
-  
   const schema = Joi.object({
     propertyId: Joi.string()
       .optional()
@@ -32,18 +20,35 @@ const validateBooking = (req, res, next) => {
       }),
     // FIXED: Removed .greater('now') - same-day booking is allowed
     // Date validation (past dates) is done in controller using date-only comparison
+    // Daily flow dates (optional when using 24-hour flow)
     checkIn: Joi.date()
-      .required()
+      .optional()
       .messages({
-        'date.base': 'Check-in date must be a valid date',
-        'any.required': 'Check-in date is required'
+        'date.base': 'Check-in date must be a valid date'
       }),
     checkOut: Joi.date()
       .greater(Joi.ref('checkIn'))
-      .required()
+      .optional()
       .messages({
-        'date.greater': 'Check-out date must be after check-in date',
-        'any.required': 'Check-out date is required'
+        'date.greater': 'Check-out date must be after check-in date'
+      }),
+    // 24-hour flow datetime + duration
+    checkInDateTime: Joi.date()
+      .optional()
+      .messages({
+        'date.base': 'Check-in datetime must be a valid date'
+      }),
+    bookingDuration: Joi.string()
+      .valid('daily', '24hour')
+      .optional()
+      .messages({
+        'any.only': 'bookingDuration must be either daily or 24hour'
+      }),
+    extensionHours: Joi.number()
+      .valid(0, 6, 12, 18, 24)
+      .optional()
+      .messages({
+        'any.only': 'extensionHours must be 0, 6, 12, 18, or 24'
       }),
     guests: Joi.object({
       adults: Joi.number()
@@ -122,35 +127,38 @@ const validateBooking = (req, res, next) => {
       .messages({
         'boolean.base': 'Terms agreement must be a boolean value'
       }),
-    // Custom check-in time (HH:mm format) - for hourly booking with custom times
+    // Custom check-in time (HH:mm format) - for hourly/24h flows
     checkInTime: Joi.string()
       .pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/)
       .optional()
       .messages({
         'string.pattern.base': 'Check-in time must be in HH:mm format'
       }),
-    hourlyExtension: Joi.object({
-      hours: Joi.number()
-        .valid(6, 12, 18)
-        .optional()
-        .messages({
-          'any.only': 'Hourly extension must be 6, 12, or 18 hours'
-        }),
-      rate: Joi.number()
-        .min(0)
-        .max(1)
-        .optional()
-        .messages({
-          'number.min': 'Hourly rate must be between 0 and 1',
-          'number.max': 'Hourly rate must be between 0 and 1'
-        }),
-      totalHours: Joi.number()
-        .min(0)
-        .optional()
-        .messages({
-          'number.min': 'Total hours cannot be negative'
-        })
-    }).optional(),
+    hourlyExtension: Joi.alternatives().try(
+      Joi.object({
+        hours: Joi.number()
+          .valid(6, 12, 18)
+          .optional()
+          .messages({
+            'any.only': 'Hourly extension must be 6, 12, or 18 hours'
+          }),
+        rate: Joi.number()
+          .min(0)
+          .max(1)
+          .optional()
+          .messages({
+            'number.min': 'Hourly rate must be between 0 and 1',
+            'number.max': 'Hourly rate must be between 0 and 1'
+          }),
+        totalHours: Joi.number()
+          .min(0)
+          .optional()
+          .messages({
+            'number.min': 'Total hours cannot be negative'
+          })
+      }),
+      Joi.number().valid(0, 6, 12, 18, 24)
+    ).optional(),
     // Security fields
     idempotencyKey: Joi.string()
       .optional()
@@ -258,7 +266,7 @@ const validateBooking = (req, res, next) => {
     }).optional()
   });
 
-  const { error } = schema.validate(req.body, { abortEarly: false });
+  const { error } = schema.validate(req.body, { abortEarly: false, allowUnknown: true });
   if (error) {
     console.error('❌ ===========================================');
     console.error('❌ Validation failed in validateBooking');
@@ -278,8 +286,6 @@ const validateBooking = (req, res, next) => {
       }))
     });
   }
-
-  console.log('✅ Validation passed in validateBooking');
 
   // Custom validation: ensure at least one of propertyId, listingId, or serviceId is provided
   const { propertyId, listingId, serviceId } = req.body;
@@ -635,3 +641,4 @@ module.exports = {
   validateApplyCoupon,
   validateBookingQuery
 }; 
+

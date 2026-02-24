@@ -41,10 +41,9 @@ const getUserProfile = async (req, res) => {
     }
 
     // Get recent reviews received
-    const reviews = await Review.find({ reviewedUser: id, isPublished: true })
+    const reviews = await Review.find({ host: id, isPublic: true })
       .populate('reviewer', 'name profileImage')
-      .populate('listing', 'title')
-      .populate('service', 'title')
+      .populate('property', 'title')
       .sort({ createdAt: -1 })
       .limit(5);
 

@@ -185,12 +185,24 @@ const getPropertyAvailability = async (req, res) => {
     });
 
     // Transform to include booking details and maintenance info
+    const ensureDate = (val) => {
+      if (!val) return null;
+      const d = val instanceof Date ? val : new Date(val);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
     const availabilityWithDetails = availability.map(slot => {
       const slotObj = slot.toObject();
-      const dateStr = new Date(slotObj.date).toISOString().split('T')[0];
+      const slotDate = ensureDate(slotObj.date);
+      if (!slotDate) {
+        console.warn('⚠️ Invalid slot date encountered in availability:', slotObj.date);
+        slotObj.dateError = 'invalid_date';
+        return slotObj;
+      }
+      const dateStr = slotDate.toISOString().split('T')[0];
       
       // Normalize slot date for comparison (used in multiple places)
-      const slotDateLocal = new Date(new Date(slotObj.date).getFullYear(), new Date(slotObj.date).getMonth(), new Date(slotObj.date).getDate());
+      const slotDateLocal = new Date(slotDate.getFullYear(), slotDate.getMonth(), slotDate.getDate());
       const slotDateStr = slotDateLocal.toISOString().split('T')[0];
       
       if (slotObj.bookedBy && typeof slotObj.bookedBy === 'object') {
@@ -311,7 +323,11 @@ const getPropertyAvailability = async (req, res) => {
       // This handles cases where checkout date was marked as 'partially-available' but bookedBy wasn't populated
       if (!slotObj.bookedBy && checkoutDatesMap.has(dateStr)) {
         const checkoutInfo = checkoutDatesMap.get(dateStr);
-        const checkoutDate = new Date(checkoutInfo.checkoutDate);
+        const checkoutDate = ensureDate(checkoutInfo.checkoutDate);
+        if (!checkoutDate) {
+          console.warn('⚠️ Invalid checkoutDate in checkoutInfo', checkoutInfo.checkoutDate);
+          return slotObj; // leave slot unchanged for this entry
+        }
         const checkoutDateLocal = new Date(checkoutDate.getFullYear(), checkoutDate.getMonth(), checkoutDate.getDate());
         const checkoutDateStr = checkoutDateLocal.toISOString().split('T')[0];
         
@@ -401,7 +417,8 @@ const getPropertyAvailability = async (req, res) => {
     for (const [checkoutDateStr, checkoutInfo] of checkoutDatesMap.entries()) {
       const existsInAvailability = availabilityWithDetails.some(
         slot => {
-          const slotDate = new Date(slot.date);
+          const slotDate = ensureDate(slot.date);
+          if (!slotDate) return false;
           const slotDateLocal = new Date(slotDate.getFullYear(), slotDate.getMonth(), slotDate.getDate());
           return slotDateLocal.toISOString().split('T')[0] === checkoutDateStr;
         }
@@ -1946,6 +1963,7 @@ const checkTimeSlotAvailability = async (req, res) => {
     }
 
     const checkInDate = new Date(checkIn);
+    
     let checkOutDate = new Date(checkOut);
 
     // If extension hours provided, add them to checkout
@@ -1972,6 +1990,43 @@ const checkTimeSlotAvailability = async (req, res) => {
       checkInDate,
       checkOutDate
     );
+
+    console.log('🔍 Hourly availability check result:', conflicts);
+
+    // Hard block if maintenance overlaps the requested window
+    if (conflicts?.events && Array.isArray(conflicts.events)) {
+      const maintenanceStart = conflicts.events.find(e => e.eventType === 'maintenance_start');
+      const maintenanceEnd = conflicts.events.find(e => e.eventType === 'maintenance_end');
+      if (maintenanceStart && maintenanceEnd) {
+        const maintStartTime = new Date(maintenanceStart.time);
+        const maintEndTime = new Date(maintenanceEnd.time);
+        const overlapsMaintenance =
+          checkInDate < maintEndTime && checkOutDate > maintStartTime;
+        if (overlapsMaintenance) {
+          return res.status(200).json({
+            success: true,
+            data: {
+              available: false,
+              checkIn: checkInDate.toISOString(),
+              checkOut: checkOutDate.toISOString(),
+              extensionHours,
+              maintenanceEnd: maintEndTime.toISOString(),
+              conflicts: {
+                hourlyConflicts: [
+                  {
+                    type: 'maintenance',
+                    start: maintStartTime.toISOString(),
+                    end: maintEndTime.toISOString(),
+                    message: 'Slot overlaps maintenance window'
+                  }
+                ]
+              },
+              message: 'Selected time overlaps maintenance window'
+            }
+          });
+        }
+      }
+    }
 
     // Also check daily availability for the date range (use LOCAL date to avoid UTC shift)
     const formatLocalDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -2098,7 +2153,7 @@ const checkTimeSlotAvailability = async (req, res) => {
       }
       
       // Only check hour restrictions for the check-in date
-      if (slotDateStr === checkInDateStr && slot.status === 'available') {
+      if (slotDateStr === checkInDateStr && ['available', 'partially-available'].includes(slot.status)) {
         const checkInHours = checkInDate.getHours();
         const checkInMinutes = checkInDate.getMinutes();
         const checkInTimeStr = `${checkInHours.toString().padStart(2, '0')}:${checkInMinutes.toString().padStart(2, '0')}`;
@@ -2226,10 +2281,18 @@ const checkTimeSlotAvailability = async (req, res) => {
     console.log("filtered daily availability:", filteredDailyAvailability);
 
     // Only count dates with blocking statuses as conflicts (exclude 'available' status)
-    const blockingDates = filteredDailyAvailability.filter(slot => 
-      ['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold','partially-available'].includes(slot.status)
-    );
-    
+    // const blockingDates = filteredDailyAvailability.filter(slot => 
+    //   ['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold','partially-available'].includes(slot.status)
+    // );
+
+    const blockingDates = filteredDailyAvailability.filter(slot => {
+        // Fully blocking statuses
+        if (['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold'].includes(slot.status)) {
+          return true;
+        }
+        return false;
+      });
+          
     console.log("blocking dates", blockingDates);
     // If any dates in the range don't have explicit availability records, they're unavailable
     // Add missing dates as conflicts
@@ -2255,8 +2318,13 @@ const checkTimeSlotAvailability = async (req, res) => {
       missingDatesCount: missingDates.length
     });
     
-    const hasConflicts = (conflicts && conflicts.length > 0) || blockingDates.length > 0;
+    // const hasConflicts = (conflicts && conflicts.length > 0) || blockingDates.length > 0;
     
+
+    const hasHourlyConflict = conflicts && conflicts.available === false;
+
+const hasConflicts =
+  hasHourlyConflict || blockingDates.length > 0;
     console.log('✅ Final availability result:', {
       hasConflicts,
       available: !hasConflicts,
@@ -2293,7 +2361,8 @@ const checkTimeSlotAvailability = async (req, res) => {
         extensionHours,
         maintenanceEnd: maintenanceEndDate.toISOString(),
         conflicts: hasConflicts ? {
-          hourlyConflicts: conflicts || [],
+          // hourlyConflicts: conflicts || [],
+          hourlyConflicts: conflicts && conflicts.available === false ? [conflicts] : [],
           dailyConflicts: blockingDates.map(a => ({
             date: a.date,
             status: a.status,

@@ -506,6 +506,7 @@ const getListing = async (req, res) => {
       if (listingObj.images && Array.isArray(listingObj.images)) {
         listingObj.images = listingObj.images.map((image, index) => ({
           url: image.url,
+          category: image.category || "Other",
           publicId: image.publicId,
           isPrimary: image.isPrimary || index === 0, // Ensure isPrimary is set
           caption: image.caption || '',

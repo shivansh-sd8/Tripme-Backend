@@ -78,6 +78,19 @@ const propertySchema = new mongoose.Schema({
       type: String,
       required: false
     },
+     category: {  
+    type: String,
+    enum: [
+      "Living room",
+      "Bedroom",
+      "Kitchen",
+      "Bathroom",
+      "Exterior",
+      "Amenities",
+      "Other"
+    ],
+    default: "Other"
+  },
     isPrimary: {
       type: Boolean,
       default: false
@@ -343,12 +356,42 @@ const propertySchema = new mongoose.Schema({
       min: 0,
       max: 5
     },
-    cleanliness: Number,
-    accuracy: Number,
-    communication: Number,
-    location: Number,
-    checkIn: Number,
-    value: Number
+    cleanliness: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 5
+    },
+    accuracy: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 5
+    },
+    communication: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 5
+    },
+    location: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 5
+    },
+    checkIn: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 5
+    },
+    value: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 5
+    }
   },
   reviewCount: {
     type: Number,

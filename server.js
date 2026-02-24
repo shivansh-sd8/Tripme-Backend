@@ -142,7 +142,14 @@ app.use(helmet);
 // This already handles all OPTIONS preflight requests automatically
 app.use(cors(corsOptions));
 
-app.use(express.json({ limit: securityConfig.validation.maxRequestSize }));
+app.use(express.json({
+  limit: securityConfig.validation.maxRequestSize,
+  verify: (req, res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith('/api/payments/webhook/')) {
+      req.rawBody = buf.toString('utf8');
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: securityConfig.validation.maxRequestSize }));
 
 // Global rate limiting

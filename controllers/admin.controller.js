@@ -10,6 +10,7 @@ const Admin = require('../models/Admin');
 const Session = require('../models/Session');
 const KycVerification = require('../models/KycVerification');
 const jwt = require('jsonwebtoken');
+const razorpayService = require('../services/razorpay.service');
 
 // Dashboard Stats
 const getDashboardStats = async (req, res) => {
@@ -820,90 +821,238 @@ const getBookings = async (req, res) => {
   }
 };
 
+// const refundBooking = async (req, res) => {
+//   try {
+//     const { bookingId } = req.params;
+//     const { reason, refundAmount, refundType } = req.body;
+    
+//     if (!reason) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Refund reason is required'
+//       });
+//     }
+    
+//     const booking = await Booking.findById(bookingId)
+//       .populate('payment')
+//       .populate('user', 'name email')
+//       .populate('host', 'name email');
+    
+//     if (!booking) {
+//       return res.status(404).json({
+//         success: false,
+//         message: 'Booking not found'
+//       });
+//     }
+    
+//     // Allow refunding cancelled bookings, but block already refunded ones
+//     if (booking.status === 'refunded') {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Booking is already refunded'
+//       });
+//     }
+    
+//     // Calculate refund amount
+//     const totalRefundAmount = refundAmount || booking.totalAmount;
+//     const refundTypeValue = refundType || 'full';
+    
+//     // Update booking status (keep cancelled status if it was cancelled; otherwise mark refunded)
+//     booking.status = booking.status === 'cancelled' ? 'cancelled' : 'refunded';
+//     booking.refundReason = reason;
+//     booking.refundAmount = totalRefundAmount;
+//     booking.refundType = refundTypeValue;
+//     booking.refundedBy = req.user._id;
+//     booking.refundedAt = new Date();
+    
+//     // Update payment status if exists
+//     if (booking.payment) {
+//       booking.payment.status = 'refunded';
+//       booking.payment.refundAmount = totalRefundAmount;
+//       booking.payment.refundReason = reason;
+//       booking.payment.refundedBy = req.user._id;
+//       booking.payment.refundedAt = new Date();
+//       await booking.payment.save();
+//     }
+//     // Also reflect paymentStatus field on booking
+//     booking.paymentStatus = 'refunded';
+    
+//     await booking.save();
+    
+//     console.log(`✅ Booking ${booking.receiptId} refunded by admin ${req.user.email}. Amount: ${totalRefundAmount}, Reason: ${reason}`);
+    
+//     res.status(200).json({
+//       success: true,
+//       message: 'Booking refunded successfully',
+//       data: {
+//         booking: {
+//           _id: booking._id,
+//           receiptId: booking.receiptId,
+//           status: booking.status,
+//           refundAmount: totalRefundAmount,
+//           refundType: refundTypeValue,
+//           refundReason: reason,
+//           refundedBy: req.user.email,
+//           refundedAt: booking.refundedAt
+//         }
+//       }
+//     });
+//   } catch (error) {
+//     console.error('❌ Error refunding booking:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Failed to refund booking',
+//       error: error.message
+//     });
+//   }
+// };
+
+// KYC Management Functions
+
+
 const refundBooking = async (req, res) => {
   try {
+    // 🔒 Admin guard
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admin can process refunds'
+      });
+    }
+
     const { bookingId } = req.params;
-    const { reason, refundAmount, refundType } = req.body;
-    
+    const { reason, refundAmount, refundType = 'full' } = req.body;
+
     if (!reason) {
       return res.status(400).json({
         success: false,
         message: 'Refund reason is required'
       });
     }
-    
+
     const booking = await Booking.findById(bookingId)
       .populate('payment')
-      .populate('user', 'name email')
-      .populate('host', 'name email');
-    
+      .populate('user', 'name email');
+
     if (!booking) {
       return res.status(404).json({
         success: false,
         message: 'Booking not found'
       });
     }
-    
-    if (booking.status === 'cancelled' || booking.status === 'refunded') {
+
+    // ❗ Only cancelled bookings can be refunded
+    if (booking.status !== 'cancelled') {
       return res.status(400).json({
         success: false,
-        message: 'Booking is already cancelled or refunded'
+        message: 'Only cancelled bookings can be refunded'
       });
     }
-    
-    // Calculate refund amount
-    const totalRefundAmount = refundAmount || booking.totalAmount;
-    const refundTypeValue = refundType || 'full';
-    
-    // Update booking status
-    booking.status = 'refunded';
+
+    // ❌ Already refunded
+    if (booking.refundStatus === 'completed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Booking already refunded'
+      });
+    }
+
+    // ❌ Payment missing
+    if (!booking.payment || !booking.payment.razorpayPaymentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Razorpay payment not found for this booking'
+      });
+    }
+
+    // 💰 Validate refund amount
+    const finalRefundAmount =
+      refundAmount !== undefined
+        ? Number(refundAmount)
+        : booking.totalAmount;
+
+    if (
+      !Number.isFinite(finalRefundAmount) ||
+      finalRefundAmount <= 0 ||
+      finalRefundAmount > booking.totalAmount
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid refund amount'
+      });
+    }
+
+    // ============================
+    // 🔁 RAZORPAY REFUND (SERVICE)
+    // ============================
+    const refund = await razorpayService.createRefund(
+      booking.payment.razorpayPaymentId,
+      finalRefundAmount,
+      reason,
+      {
+        bookingId: booking._id.toString(),
+        refundType,
+        refundedBy: req.user.email
+      }
+    );
+
+    // ============================
+    // ✅ UPDATE PAYMENT
+    // ============================
+    booking.payment.status =
+      finalRefundAmount === booking.totalAmount
+        ? 'refunded'
+        : 'partially_refunded';
+
+    booking.payment.refundAmount = finalRefundAmount;
+    booking.payment.refundReason = reason;
+    booking.payment.razorpayRefundId = refund.refundId;
+    booking.payment.refundedBy = req.user._id;
+    booking.payment.refundedAt = new Date();
+
+    await booking.payment.save();
+
+    // ============================
+    // ✅ UPDATE BOOKING
+    // ============================
+    booking.refundAmount = finalRefundAmount;
+    booking.refundType = refundType;
     booking.refundReason = reason;
-    booking.refundAmount = totalRefundAmount;
-    booking.refundType = refundTypeValue;
+    booking.refundStatus = 'completed';
     booking.refundedBy = req.user._id;
     booking.refundedAt = new Date();
-    
-    // Update payment status if exists
-    if (booking.payment) {
-      booking.payment.status = 'refunded';
-      booking.payment.refundAmount = totalRefundAmount;
-      booking.payment.refundReason = reason;
-      booking.payment.refundedBy = req.user._id;
-      booking.payment.refundedAt = new Date();
-      await booking.payment.save();
-    }
-    
+    booking.paymentStatus = booking.payment.status;
+
     await booking.save();
-    
-    console.log(`✅ Booking ${booking.receiptId} refunded by admin ${req.user.email}. Amount: ${totalRefundAmount}, Reason: ${reason}`);
-    
-    res.status(200).json({
+
+    console.log(
+      `✅ Refund success | Booking ${booking._id} | Razorpay Refund ${refund.refundId}`
+    );
+
+    return res.status(200).json({
       success: true,
-      message: 'Booking refunded successfully',
+      message: 'Refund processed successfully',
       data: {
-        booking: {
-          _id: booking._id,
-          receiptId: booking.receiptId,
-          status: booking.status,
-          refundAmount: totalRefundAmount,
-          refundType: refundTypeValue,
-          refundReason: reason,
-          refundedBy: req.user.email,
-          refundedAt: booking.refundedAt
-        }
+        bookingId: booking._id,
+        refundAmount: finalRefundAmount,
+        razorpayRefundId: refund.refundId,
+        refundStatus: refund.status
       }
     });
+
   } catch (error) {
-    console.error('❌ Error refunding booking:', error);
-    res.status(500).json({
+    console.error('❌ Admin refund failed:', error);
+
+    return res.status(500).json({
       success: false,
-      message: 'Failed to refund booking',
+      message: 'Refund failed',
       error: error.message
     });
   }
 };
 
-// KYC Management Functions
+
+
 const getKYC = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, search } = req.query;
@@ -1310,23 +1459,38 @@ const getReviews = async (req, res) => {
       ];
     }
     
-    // Get reviews with pagination
+    // Get reviews with pagination (align fields to current Review schema)
     const reviews = await Review.find(filter)
       .populate('reviewer', 'name email')
-      .populate('reviewedUser', 'name email')
-      .populate('listing', 'title address')
-      .populate('service', 'title description')
+      .populate('host', 'name email')
+      .populate('property', 'title address')
       .populate('booking', 'receiptId')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
-      .skip((page - 1) * limit);
+      .skip((page - 1) * limit)
+      .lean();
     
     const total = await Review.countDocuments(filter);
+
+    // Map to lightweight shape expected by Admin UI
+    const formatted = reviews.map((rev) => ({
+      id: rev._id,
+      reviewerName: rev.reviewer?.name || 'Unknown',
+      reviewerEmail: rev.reviewer?.email || '',
+      revieweeName: rev.host?.name || '',
+      revieweeEmail: rev.host?.email || '',
+      propertyTitle: rev.property?.title || 'N/A',
+      rating: rev.rating?.overall || rev.rating || 0,
+      content: rev.comment || '',
+      status: rev.reports?.length ? 'flagged' : 'active',
+      createdAt: rev.createdAt,
+      flaggedReason: rev.reports?.[0]?.reason,
+    }));
     
     res.status(200).json({
       success: true,
       data: {
-        reviews,
+        data: formatted,
         pagination: {
           current: parseInt(page),
           pages: Math.ceil(total / limit),

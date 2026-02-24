@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const paymentController = require('../controllers/payment.controller');
-const { auth } = require('../middlewares/auth.middleware');
+const { auth, adminOnly } = require('../middlewares/auth.middleware');
 const { validatePayment, validateRefund } = require('../validations/payment.validation');
 const AuthorizationMiddleware = require('../middlewares/authorization.middleware');
 const { bookingRateLimit, strictRateLimit } = require('../middlewares/rateLimit.middleware');
@@ -68,10 +68,10 @@ router.get('/stats/monthly', paymentController.getMonthlyPaymentStats);
 router.get('/stats/methods', paymentController.getPaymentMethodStats);
 
 // Admin routes (admin only)
-router.get('/admin/all', paymentController.getAllPayments);
-router.get('/admin/payouts', paymentController.getPendingPayouts);
-router.post('/admin/payouts/:payoutId/process', paymentController.processHostPayout);
-router.get('/admin/stats', paymentController.getAdminPaymentStats);
-router.patch('/admin/:paymentId/status', paymentController.updatePaymentStatus);
+router.get('/admin/all', adminOnly, paymentController.getAllPayments);
+router.get('/admin/payouts', adminOnly, paymentController.getPendingPayouts);
+router.post('/admin/payouts/:payoutId/process', adminOnly, paymentController.processHostPayout);
+router.get('/admin/stats', adminOnly, paymentController.getAdminPaymentStats);
+router.patch('/admin/:paymentId/status', adminOnly, paymentController.updatePaymentStatus);
 
 module.exports = router; 
