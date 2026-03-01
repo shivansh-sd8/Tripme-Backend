@@ -11,7 +11,7 @@ const getPlatformFeeRate = async (req, res) => {
   try {
     // Get the latest pricing configuration
     const pricingConfig = await PricingConfig.findOne().sort({ createdAt: -1 });
-    
+
     if (!pricingConfig) {
       return res.status(404).json({
         success: false,
@@ -50,7 +50,8 @@ const calculatePricing = async (req, res) => {
       couponCode,
       bookingType = 'daily',
       checkInDateTime,
-      extensionHours = 0
+      extensionHours = 0,
+      isLateCheckIn = false  // When true, apply basePrice24Hour rate per night for multi-night bookings
     } = req.body;
 
     // Validate required fields and basic correctness (from secure flow)
@@ -135,8 +136,14 @@ const calculatePricing = async (req, res) => {
     const totalHours = is24HourBooking ? (24 + (extensionHours || 0)) : undefined;
 
     // Determine base price
+    // - 24-hour booking → always use basePrice24Hour
+    // - Late check-in (after 4 PM) for any duration → use basePrice24Hour per night
+    // - Regular daily → use standard basePrice
     let basePrice;
     if (is24HourBooking && property.pricing?.basePrice24Hour) {
+      basePrice = property.pricing.basePrice24Hour;
+    } else if (!is24HourBooking && isLateCheckIn && property.pricing?.basePrice24Hour) {
+      // Multi-night (or same-night) booking with late check-in: use 24-hour price per night
       basePrice = property.pricing.basePrice24Hour;
     } else {
       basePrice = property.pricing?.basePrice || 0;
@@ -181,7 +188,7 @@ const calculatePricing = async (req, res) => {
     let discountAmount = 0;
     if (couponCode) {
       try {
-        const coupon = await Coupon.findOne({ 
+        const coupon = await Coupon.findOne({
           code: couponCode.toUpperCase(),
           isActive: true,
           validFrom: { $lte: new Date() },
@@ -247,7 +254,7 @@ const calculatePricing = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: { 
+      data: {
         pricing: response,
         security: {
           pricingToken,
@@ -335,7 +342,7 @@ const validateCoupon = async (req, res) => {
     const checkOutDateOnly = new Date(checkOutDate.getFullYear(), checkOutDate.getMonth(), checkOutDate.getDate());
     const diffTime = checkOutDateOnly - checkInDateOnly;
     const nights = Math.max(0, diffTime / (1000 * 60 * 60 * 24));
-    
+
     // Get property for base price calculation
     const property = await Property.findById(propertyId);
     if (!property) {
@@ -347,7 +354,7 @@ const validateCoupon = async (req, res) => {
 
     const basePrice = property.pricing?.basePrice || 0;
     const subtotal = basePrice * (nights || 1); // Avoid zero for same-day validation
-    
+
     let discountAmount;
     if (coupon.discountType === 'percentage') {
       discountAmount = (subtotal * coupon.amount) / 100;

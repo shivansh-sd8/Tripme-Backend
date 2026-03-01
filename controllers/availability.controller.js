@@ -2290,21 +2290,27 @@ const checkTimeSlotAvailability = async (req, res) => {
         if (['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold'].includes(slot.status)) {
           return true;
         }
+        
         return false;
       });
           
     console.log("blocking dates", blockingDates);
     // If any dates in the range don't have explicit availability records, they're unavailable
-    // Add missing dates as conflicts
+    // Add missing dates as conflicts (but only for non-hourly properties).
+    const isHourlyProperty = property?.hourlyBooking?.enabled;
     if (missingDates.length > 0) {
-      missingDates.forEach(dateStr => {
-        blockingDates.push({
-          date: new Date(dateStr),
-          status: 'unavailable',
-          reason: 'Date not explicitly set as available by host'
+      if (!isHourlyProperty) {
+        missingDates.forEach(dateStr => {
+          blockingDates.push({
+            date: new Date(dateStr),
+            status: 'unavailable',
+            reason: 'Date not explicitly set as available by host'
+          });
         });
-      });
-      console.log(`❌ Missing availability records for dates: ${missingDates.join(', ')} - treating as unavailable`);
+        console.log(`❌ Missing availability records for dates: ${missingDates.join(', ')} - treating as unavailable (non-hourly property)`);
+      } else {
+        console.log(`INFO Missing availability records for dates: ${missingDates.join(', ')} but property is hourly-enabled; relying on event-based availability`);
+      }
     }
     
     console.log('🔍 Final conflict check:', {

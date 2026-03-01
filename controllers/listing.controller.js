@@ -1002,6 +1002,39 @@ const getFeaturedListings = async (req, res) => {
   }
 };
 
+
+// @desc    Get featured listings
+// @route   GET /api/listings/featured
+// @access  Public
+const getSponseredListings = async (req, res) => {
+  try {
+    const { limit = 6 } = req.query;
+
+    const listings = await Property.find({
+      status: 'published',
+      approvalStatus: 'approved',
+      isSponsored: true
+    })
+      .populate('host', 'name profileImage')
+      .sort({ rating: -1, reviewCount: -1 })
+      .limit(Number(limit));
+
+    // Transform featured listings for frontend
+    const transformedFeaturedListings = listings.map(transformListingForFrontend);
+
+    res.status(200).json({
+      success: true,
+      data: { listings: transformedFeaturedListings }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching featured listings',
+      error: error.message
+    });
+  }
+};
+
 // @desc    Get similar listings
 // @route   GET /api/listings/:id/similar
 // @access  Public
@@ -1055,6 +1088,7 @@ module.exports = {
   addToWishlist,
   removeFromWishlist,
   getFeaturedListings,
+  getSponseredListings,
   getSimilarListings,
   publishListing,
   publishApprovedListing,

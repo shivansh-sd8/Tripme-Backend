@@ -21,9 +21,9 @@ const getDashboardStats = async (req, res) => {
       createdAt: { $gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
     });
     const totalHosts = await User.countDocuments({ role: 'host' });
-    const pendingKYC = await User.countDocuments({ 
-      role: 'host', 
-      'kyc.status': { $in: ['pending', 'submitted'] } 
+    const pendingKYC = await User.countDocuments({
+      role: 'host',
+      'kyc.status': { $in: ['pending', 'submitted'] }
     });
 
     // Get property stats
@@ -113,36 +113,36 @@ const getCurrentPlatformFeeRate = async (req, res) => {
 const updatePlatformFeeRate = async (req, res) => {
   try {
     const { platformFeeRate, changeReason } = req.body;
-    
+
     if (!platformFeeRate || typeof platformFeeRate !== 'number') {
       return res.status(400).json({
         success: false,
         message: 'Platform fee rate is required and must be a number'
       });
     }
-    
+
     if (platformFeeRate < 0 || platformFeeRate > 1) {
       return res.status(400).json({
-      success: false,
+        success: false,
         message: 'Platform fee rate must be between 0 and 1 (0-100%)'
       });
     }
-    
+
     const currentRate = await PricingConfig.getCurrentPlatformFeeRate();
-    
+
     if (Math.abs(currentRate - platformFeeRate) < 0.001) {
       return res.status(400).json({
         success: false,
         message: 'New platform fee rate is the same as current rate'
       });
     }
-    
+
     const newConfig = await PricingConfig.updatePlatformFeeRate(
       platformFeeRate,
       req.user._id,
       changeReason || 'Platform fee rate updated via admin panel'
     );
-    
+
     const adminName = req.user?.name || req.user?.email || 'Unknown Admin';
     console.log(`✅ Platform fee rate updated from ${(currentRate * 100).toFixed(1)}% to ${(platformFeeRate * 100).toFixed(1)}% by admin ${adminName}`);
 
@@ -172,9 +172,9 @@ const updatePlatformFeeRate = async (req, res) => {
 const getPlatformFeeHistory = async (req, res) => {
   try {
     const { limit = 20 } = req.query;
-    
+
     const history = await PricingConfig.getPricingHistory(parseInt(limit));
-    
+
     const formattedHistory = history.map(config => ({
       id: config._id,
       platformFeeRate: config.platformFeeRate,
@@ -211,9 +211,9 @@ const getUsers = async (req, res) => {
   try {
     console.log('🔍 getUsers called with query:', req.query);
     console.log('🔍 User model:', User);
-    
+
     const { page = 1, limit = 20, role, status, search } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (role) filter.role = role;
@@ -224,22 +224,22 @@ const getUsers = async (req, res) => {
         { email: { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     console.log('🔍 Filter:', filter);
-    
+
     // Get users with pagination
     const users = await User.find(filter)
       .select('-password')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     console.log('🔍 Users found:', users.length);
-    
+
     const total = await User.countDocuments(filter);
-    
+
     console.log('🔍 Total users:', total);
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -266,14 +266,14 @@ const updateUserStatus = async (req, res) => {
   try {
     const { userId } = req.params;
     const { accountStatus, reason } = req.body;
-    
+
     if (!['active', 'suspended', 'banned', 'deactivated'].includes(accountStatus)) {
       return res.status(400).json({
         success: false,
         message: 'Invalid account status. Must be active, suspended, banned, or deactivated'
       });
     }
-    
+
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
@@ -281,17 +281,17 @@ const updateUserStatus = async (req, res) => {
         message: 'User not found'
       });
     }
-    
+
     const oldStatus = user.accountStatus;
     user.accountStatus = accountStatus;
     user.statusChangeReason = reason;
     user.statusChangedBy = req.user._id;
     user.statusChangedAt = new Date();
-    
+
     await user.save();
-    
+
     console.log(`✅ User ${user.email} status changed from ${oldStatus} to ${accountStatus} by admin ${req.user.email}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'User status updated successfully',
@@ -318,7 +318,7 @@ const updateUserStatus = async (req, res) => {
 const getUser = async (req, res) => {
   try {
     const { userId } = req.params;
-    
+
     const user = await User.findById(userId).select('-password');
     if (!user) {
       return res.status(404).json({
@@ -326,12 +326,12 @@ const getUser = async (req, res) => {
         message: 'User not found'
       });
     }
-    
+
     // Get additional user data
     const userBookings = await Booking.find({ user: userId }).countDocuments();
     const userProperties = await Property.find({ host: userId }).countDocuments();
     const userReviews = await Review.find({ reviewer: userId }).countDocuments();
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -359,7 +359,7 @@ const updateUser = async (req, res) => {
   try {
     const { userId } = req.params;
     const { name, email, phone, role, isVerified } = req.body;
-    
+
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
@@ -367,21 +367,21 @@ const updateUser = async (req, res) => {
         message: 'User not found'
       });
     }
-    
+
     // Update allowed fields
     if (name) user.name = name;
     if (email) user.email = email;
     if (phone) user.phone = phone;
     if (role) user.role = role;
     if (typeof isVerified === 'boolean') user.isVerified = isVerified;
-    
+
     user.updatedBy = req.user._id;
     user.updatedAt = new Date();
-    
+
     await user.save();
-    
+
     console.log(`✅ User ${user.email} updated by admin ${req.user.email}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'User updated successfully',
@@ -411,7 +411,7 @@ const updateUser = async (req, res) => {
 const getHosts = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, search } = req.query;
-    
+
     // Build filter for hosts
     const filter = { role: 'host' };
     if (status) filter.accountStatus = status;
@@ -421,7 +421,7 @@ const getHosts = async (req, res) => {
         { email: { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     // Get hosts with pagination
     const hosts = await User.find(filter)
       .select('-password')
@@ -429,9 +429,9 @@ const getHosts = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     const total = await User.countDocuments(filter);
-    
+
     // Get additional host stats
     const hostsWithStats = await Promise.all(hosts.map(async (host) => {
       const propertiesCount = await Property.countDocuments({ host: host._id });
@@ -440,7 +440,7 @@ const getHosts = async (req, res) => {
         { $match: { host: host._id, status: 'completed' } },
         { $group: { _id: null, total: { $sum: '$hostAmount' } } }
       ]);
-      
+
       return {
         ...host.toObject(),
         stats: {
@@ -450,7 +450,7 @@ const getHosts = async (req, res) => {
         }
       };
     }));
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -476,7 +476,7 @@ const approveHost = async (req, res) => {
   try {
     const { hostId } = req.params;
     const { reason } = req.body;
-    
+
     const host = await User.findById(hostId);
     if (!host) {
       return res.status(404).json({
@@ -484,14 +484,14 @@ const approveHost = async (req, res) => {
         message: 'Host not found'
       });
     }
-    
+
     if (host.role !== 'host') {
       return res.status(400).json({
         success: false,
         message: 'User is not a host'
       });
     }
-    
+
     // Update host status
     host.accountStatus = 'active';
     host.isVerified = true;
@@ -499,11 +499,11 @@ const approveHost = async (req, res) => {
     host.verificationReason = reason || 'Host approved by admin';
     host.verifiedBy = req.user._id;
     host.verifiedAt = new Date();
-    
+
     await host.save();
-    
+
     console.log(`✅ Host ${host.email} approved by admin ${req.user.email}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'Host approved successfully',
@@ -534,14 +534,14 @@ const rejectHost = async (req, res) => {
   try {
     const { hostId } = req.params;
     const { reason } = req.body;
-    
+
     if (!reason) {
       return res.status(400).json({
         success: false,
         message: 'Rejection reason is required'
       });
     }
-    
+
     const host = await User.findById(hostId);
     if (!host) {
       return res.status(404).json({
@@ -549,14 +549,14 @@ const rejectHost = async (req, res) => {
         message: 'Host not found'
       });
     }
-    
+
     if (host.role !== 'host') {
       return res.status(400).json({
         success: false,
         message: 'User is not a host'
       });
     }
-    
+
     // Update host status
     host.accountStatus = 'suspended';
     host.isVerified = false;
@@ -564,11 +564,11 @@ const rejectHost = async (req, res) => {
     host.verificationReason = reason;
     host.verifiedBy = req.user._id;
     host.verifiedAt = new Date();
-    
+
     await host.save();
-    
+
     console.log(`✅ Host ${host.email} rejected by admin ${req.user.email}. Reason: ${reason}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'Host rejected successfully',
@@ -600,7 +600,7 @@ const rejectHost = async (req, res) => {
 const getProperties = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, search, hostId } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (status) filter.status = status;
@@ -612,16 +612,16 @@ const getProperties = async (req, res) => {
         { address: { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     // Get properties with pagination
     const properties = await Property.find(filter)
       .populate('host', 'name email phone')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     const total = await Property.countDocuments(filter);
-    
+
     // Get additional property stats
     const propertiesWithStats = await Promise.all(properties.map(async (property) => {
       const bookingsCount = await Booking.countDocuments({ property: property._id });
@@ -633,7 +633,7 @@ const getProperties = async (req, res) => {
         { $match: { property: property._id } },
         { $group: { _id: null, average: { $avg: '$rating' } } }
       ]);
-      
+
       return {
         ...property.toObject(),
         stats: {
@@ -643,7 +643,7 @@ const getProperties = async (req, res) => {
         }
       };
     }));
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -669,7 +669,7 @@ const approveListing = async (req, res) => {
   try {
     const { listingId } = req.params;
     const { reason } = req.body;
-    
+
     const property = await Property.findById(listingId);
     if (!property) {
       return res.status(404).json({
@@ -677,18 +677,18 @@ const approveListing = async (req, res) => {
         message: 'Property not found'
       });
     }
-    
+
     // Update property status
     property.status = 'published';
     property.approvalStatus = 'approved';
     property.approvalReason = reason || 'Property approved by admin';
     property.approvedBy = req.user._id;
     property.approvedAt = new Date();
-    
+
     await property.save();
-    
+
     console.log(`✅ Property ${property.title} approved by admin ${req.user.email}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'Property approved successfully',
@@ -717,14 +717,14 @@ const rejectListing = async (req, res) => {
   try {
     const { listingId } = req.params;
     const { reason } = req.body;
-    
+
     if (!reason) {
       return res.status(400).json({
         success: false,
         message: 'Rejection reason is required'
       });
     }
-    
+
     const property = await Property.findById(listingId);
     if (!property) {
       return res.status(404).json({
@@ -732,18 +732,18 @@ const rejectListing = async (req, res) => {
         message: 'Property not found'
       });
     }
-    
+
     // Update property status
     property.status = 'draft'; // Keep as draft but mark as rejected
     property.approvalStatus = 'rejected';
     property.rejectionReason = reason;
     property.approvedBy = req.user._id;
     property.approvedAt = new Date();
-    
+
     await property.save();
-    
+
     console.log(`✅ Property ${property.title} rejected by admin ${req.user.email}. Reason: ${reason}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'Property rejected successfully',
@@ -769,11 +769,85 @@ const rejectListing = async (req, res) => {
   }
 };
 
+// Toggle Featured Status
+const toggleFeatured = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const property = await Property.findById(id);
+    if (!property) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+
+    property.isFeatured = !property.isFeatured;
+    await property.save();
+
+    console.log(`✅ Property ${property.title} featured status set to ${property.isFeatured} by admin ${req.user?.email}`);
+
+    res.status(200).json({
+      success: true,
+      message: `Property ${property.isFeatured ? 'marked as featured' : 'removed from featured'}`,
+      data: {
+        _id: property._id,
+        title: property.title,
+        isFeatured: property.isFeatured
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error toggling featured status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update featured status',
+      error: error.message
+    });
+  }
+};
+
+// Toggle Sponsored Status
+const toggleSponsored = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const property = await Property.findById(id);
+    if (!property) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+
+    property.isSponsored = !property.isSponsored;
+    await property.save();
+
+    console.log(`✅ Property ${property.title} sponsored status set to ${property.isSponsored} by admin ${req.user?.email}`);
+
+    res.status(200).json({
+      success: true,
+      message: `Property ${property.isSponsored ? 'marked as sponsored' : 'removed from sponsored'}`,
+      data: {
+        _id: property._id,
+        title: property.title,
+        isSponsored: property.isSponsored
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error toggling sponsored status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update sponsored status',
+      error: error.message
+    });
+  }
+};
+
 // Booking Management Functions
 const getBookings = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, search, hostId, userId } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (status) filter.status = status;
@@ -786,7 +860,7 @@ const getBookings = async (req, res) => {
         { 'service.title': { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     // Get bookings with pagination
     const bookings = await Booking.find(filter)
       .populate('user', 'name email phone')
@@ -797,9 +871,9 @@ const getBookings = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     const total = await Booking.countDocuments(filter);
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -825,26 +899,26 @@ const getBookings = async (req, res) => {
 //   try {
 //     const { bookingId } = req.params;
 //     const { reason, refundAmount, refundType } = req.body;
-    
+
 //     if (!reason) {
 //       return res.status(400).json({
 //         success: false,
 //         message: 'Refund reason is required'
 //       });
 //     }
-    
+
 //     const booking = await Booking.findById(bookingId)
 //       .populate('payment')
 //       .populate('user', 'name email')
 //       .populate('host', 'name email');
-    
+
 //     if (!booking) {
 //       return res.status(404).json({
 //         success: false,
 //         message: 'Booking not found'
 //       });
 //     }
-    
+
 //     // Allow refunding cancelled bookings, but block already refunded ones
 //     if (booking.status === 'refunded') {
 //       return res.status(400).json({
@@ -852,11 +926,11 @@ const getBookings = async (req, res) => {
 //         message: 'Booking is already refunded'
 //       });
 //     }
-    
+
 //     // Calculate refund amount
 //     const totalRefundAmount = refundAmount || booking.totalAmount;
 //     const refundTypeValue = refundType || 'full';
-    
+
 //     // Update booking status (keep cancelled status if it was cancelled; otherwise mark refunded)
 //     booking.status = booking.status === 'cancelled' ? 'cancelled' : 'refunded';
 //     booking.refundReason = reason;
@@ -864,7 +938,7 @@ const getBookings = async (req, res) => {
 //     booking.refundType = refundTypeValue;
 //     booking.refundedBy = req.user._id;
 //     booking.refundedAt = new Date();
-    
+
 //     // Update payment status if exists
 //     if (booking.payment) {
 //       booking.payment.status = 'refunded';
@@ -876,11 +950,11 @@ const getBookings = async (req, res) => {
 //     }
 //     // Also reflect paymentStatus field on booking
 //     booking.paymentStatus = 'refunded';
-    
+
 //     await booking.save();
-    
+
 //     console.log(`✅ Booking ${booking.receiptId} refunded by admin ${req.user.email}. Amount: ${totalRefundAmount}, Reason: ${reason}`);
-    
+
 //     res.status(200).json({
 //       success: true,
 //       message: 'Booking refunded successfully',
@@ -1056,7 +1130,7 @@ const refundBooking = async (req, res) => {
 const getKYC = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, search } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (status) filter.status = status;
@@ -1066,7 +1140,7 @@ const getKYC = async (req, res) => {
         { 'user.email': { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     // Get KYC documents with pagination
     const kycDocuments = await KycVerification.find(filter)
       .populate('user', 'name email phone role kyc')
@@ -1074,9 +1148,9 @@ const getKYC = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     const total = await KycVerification.countDocuments(filter);
-    
+
     // Transform the data to match frontend expectations
     const transformedKycDocuments = kycDocuments.map(doc => ({
       _id: doc._id,
@@ -1097,7 +1171,7 @@ const getKYC = async (req, res) => {
       verifiedBy: doc.verifiedBy?.name,
       verifiedAt: doc.verifiedAt
     }));
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -1122,26 +1196,26 @@ const getKYC = async (req, res) => {
 const getKYCById = async (req, res) => {
   try {
     const { userId } = req.params;
-    
+
     // First try to find by KYC document ID (if userId is actually a KYC document ID)
     let kycDocument = await KycVerification.findById(userId)
       .populate('user', 'name email phone role kyc')
       .populate('verifiedBy', 'name email');
-    
+
     // If not found by ID, try to find by user ID
     if (!kycDocument) {
       kycDocument = await KycVerification.findOne({ user: userId })
         .populate('user', 'name email phone role kyc')
         .populate('verifiedBy', 'name email');
     }
-    
+
     if (!kycDocument) {
       return res.status(404).json({
         success: false,
         message: 'KYC document not found for this user'
       });
     }
-    
+
     // Transform the data to match modal expectations
     const transformedData = {
       user: {
@@ -1165,7 +1239,7 @@ const getKYCById = async (req, res) => {
         updatedAt: kycDocument.updatedAt
       }
     };
-    
+
     res.status(200).json({
       success: true,
       data: transformedData
@@ -1184,41 +1258,41 @@ const verifyKYC = async (req, res) => {
   try {
     const { kycId } = req.params;
     const { reason } = req.body;
-    
+
     const kycDocument = await KycVerification.findById(kycId)
       .populate('user', 'name email');
-    
+
     if (!kycDocument) {
       return res.status(404).json({
         success: false,
         message: 'KYC document not found'
       });
     }
-    
+
     if (kycDocument.status === 'verified') {
       return res.status(400).json({
         success: false,
         message: 'KYC document is already verified'
       });
     }
-    
+
     // Update KYC status
     kycDocument.status = 'verified';
     kycDocument.verifiedBy = req.user._id;
     kycDocument.verifiedAt = new Date();
     kycDocument.rejectionReason = undefined; // Clear any previous rejection reason
-    
+
     await kycDocument.save();
-    
+
     // Update user verification status
     const user = await User.findById(kycDocument.user);
     if (user) {
       user.kyc.status = 'verified';
       await user.save();
     }
-    
+
     console.log(`✅ KYC document for user ${user?.email} verified by admin ${req.user.email}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'KYC document verified successfully',
@@ -1250,39 +1324,39 @@ const rejectKYC = async (req, res) => {
   try {
     const { kycId } = req.params;
     const { reason } = req.body;
-    
+
     if (!reason) {
       return res.status(400).json({
         success: false,
         message: 'Rejection reason is required'
       });
     }
-    
+
     const kycDocument = await KycVerification.findById(kycId)
       .populate('user', 'name email');
-    
+
     if (!kycDocument) {
       return res.status(404).json({
         success: false,
         message: 'KYC document not found'
       });
     }
-    
+
     if (kycDocument.status === 'rejected') {
       return res.status(400).json({
         success: false,
         message: 'KYC document is already rejected'
       });
     }
-    
+
     // Update KYC status
     kycDocument.status = 'rejected';
     kycDocument.rejectionReason = reason;
     kycDocument.verifiedBy = req.user._id;
     kycDocument.verifiedAt = new Date();
-    
+
     await kycDocument.save();
-    
+
     // Update user verification status
     const user = await User.findById(kycDocument.user);
     if (user) {
@@ -1295,9 +1369,9 @@ const rejectKYC = async (req, res) => {
       };
       await user.save();
     }
-    
+
     console.log(`✅ KYC document for user ${user?.email} rejected by admin ${req.user.email}. Reason: ${reason}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'KYC document rejected successfully',
@@ -1330,7 +1404,7 @@ const rejectKYC = async (req, res) => {
 const getPayments = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, search, hostId, userId } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (status) filter.status = status;
@@ -1342,7 +1416,7 @@ const getPayments = async (req, res) => {
         { 'booking.receiptId': { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     // Get payments with pagination
     const payments = await Payment.find(filter)
       .populate('user', 'name email phone')
@@ -1351,9 +1425,9 @@ const getPayments = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     const total = await Payment.countDocuments(filter);
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -1379,32 +1453,32 @@ const processPayout = async (req, res) => {
   try {
     const { paymentId } = req.params;
     const { payoutAmount, payoutMethod, notes } = req.body;
-    
+
     const payment = await Payment.findById(paymentId)
       .populate('host', 'name email')
       .populate('booking', 'receiptId');
-    
+
     if (!payment) {
       return res.status(404).json({
         success: false,
         message: 'Payment not found'
       });
     }
-    
+
     if (payment.status !== 'completed') {
       return res.status(400).json({
         success: false,
         message: 'Payment must be completed before processing payout'
       });
     }
-    
+
     if (payment.payoutStatus === 'processed') {
       return res.status(400).json({
         success: false,
         message: 'Payout already processed for this payment'
       });
     }
-    
+
     // Update payment payout status
     payment.payoutStatus = 'processed';
     payment.payoutAmount = payoutAmount || payment.hostAmount;
@@ -1412,11 +1486,11 @@ const processPayout = async (req, res) => {
     payment.payoutNotes = notes;
     payment.payoutProcessedBy = req.user._id;
     payment.payoutProcessedAt = new Date();
-    
+
     await payment.save();
-    
+
     console.log(`✅ Payout processed for payment ${payment.transactionId} by admin ${req.user.email}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'Payout processed successfully',
@@ -1446,7 +1520,7 @@ const processPayout = async (req, res) => {
 const getReviews = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, search, propertyId, userId } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (status) filter.status = status;
@@ -1458,7 +1532,7 @@ const getReviews = async (req, res) => {
         { 'reviewer.name': { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     // Get reviews with pagination (align fields to current Review schema)
     const reviews = await Review.find(filter)
       .populate('reviewer', 'name email')
@@ -1469,7 +1543,7 @@ const getReviews = async (req, res) => {
       .limit(limit * 1)
       .skip((page - 1) * limit)
       .lean();
-    
+
     const total = await Review.countDocuments(filter);
 
     // Map to lightweight shape expected by Admin UI
@@ -1486,7 +1560,7 @@ const getReviews = async (req, res) => {
       createdAt: rev.createdAt,
       flaggedReason: rev.reports?.[0]?.reason,
     }));
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -1512,34 +1586,34 @@ const flagReview = async (req, res) => {
   try {
     const { reviewId } = req.params;
     const { reason, action } = req.body;
-    
+
     if (!reason) {
       return res.status(400).json({
         success: false,
         message: 'Flag reason is required'
       });
     }
-    
+
     const review = await Review.findById(reviewId)
       .populate('reviewer', 'name email');
-    
+
     if (!review) {
       return res.status(404).json({
         success: false,
         message: 'Review not found'
       });
     }
-    
+
     // Update review status
     review.status = action === 'hide' ? 'hidden' : 'flagged';
     review.flagReason = reason;
     review.flaggedBy = req.user._id;
     review.flaggedAt = new Date();
-    
+
     await review.save();
-    
+
     console.log(`✅ Review ${review._id} ${action}ed by admin ${req.user.email}. Reason: ${reason}`);
-    
+
     res.status(200).json({
       success: true,
       message: `Review ${action}ed successfully`,
@@ -1567,34 +1641,34 @@ const deleteReview = async (req, res) => {
   try {
     const { reviewId } = req.params;
     const { reason } = req.body;
-    
+
     if (!reason) {
       return res.status(400).json({
         success: false,
         message: 'Deletion reason is required'
       });
     }
-    
+
     const review = await Review.findById(reviewId)
       .populate('reviewer', 'name email');
-    
+
     if (!review) {
       return res.status(404).json({
         success: false,
         message: 'Review not found'
       });
     }
-    
+
     // Soft delete - mark as deleted
     review.status = 'deleted';
     review.deletionReason = reason;
     review.deletedBy = req.user._id;
     review.deletedAt = new Date();
-    
+
     await review.save();
-    
+
     console.log(`✅ Review ${review._id} deleted by admin ${req.user.email}. Reason: ${reason}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'Review deleted successfully',
@@ -1623,7 +1697,7 @@ const getSettings = async (req, res) => {
   try {
     // Get current platform fee rate
     const platformFeeRate = await PricingConfig.getCurrentPlatformFeeRate();
-    
+
     // Get system settings (you can expand this based on your needs)
     const settings = {
       platformFeeRate,
@@ -1637,7 +1711,7 @@ const getSettings = async (req, res) => {
       currency: 'INR',
       timezone: 'Asia/Kolkata'
     };
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -1657,12 +1731,12 @@ const getSettings = async (req, res) => {
 const updateSettings = async (req, res) => {
   try {
     const { platformFeeRate, maintenanceMode, registrationEnabled, hostRegistrationEnabled } = req.body;
-    
+
     const updates = {};
     if (typeof maintenanceMode === 'boolean') updates.maintenanceMode = maintenanceMode;
     if (typeof registrationEnabled === 'boolean') updates.registrationEnabled = registrationEnabled;
     if (typeof hostRegistrationEnabled === 'boolean') updates.hostRegistrationEnabled = hostRegistrationEnabled;
-    
+
     // Update platform fee rate if provided
     if (platformFeeRate && typeof platformFeeRate === 'number') {
       if (platformFeeRate < 0 || platformFeeRate > 1) {
@@ -1671,16 +1745,16 @@ const updateSettings = async (req, res) => {
           message: 'Platform fee rate must be between 0 and 1 (0-100%)'
         });
       }
-      
+
       await PricingConfig.updatePlatformFeeRate(
         platformFeeRate,
         req.user._id,
         'Platform fee rate updated via admin settings'
       );
     }
-    
+
     console.log(`✅ Settings updated by admin ${req.user.email}`);
-    
+
     res.status(200).json({
       success: true,
       message: 'Settings updated successfully',
@@ -1704,7 +1778,7 @@ const updateSettings = async (req, res) => {
 const getAnalytics = async (req, res) => {
   try {
     const { period = '30d' } = req.query;
-    
+
     // Calculate date range
     const now = new Date();
     let startDate;
@@ -1724,7 +1798,7 @@ const getAnalytics = async (req, res) => {
       default:
         startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     }
-    
+
     // Get analytics data
     const [
       totalUsers,
@@ -1765,7 +1839,7 @@ const getAnalytics = async (req, res) => {
         .sort({ createdAt: -1 })
         .limit(10)
     ]);
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -1796,12 +1870,12 @@ const getAnalytics = async (req, res) => {
 const getReports = async (req, res) => {
   try {
     const { type = 'summary', startDate, endDate } = req.query;
-    
+
     const start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const end = endDate ? new Date(endDate) : new Date();
-    
+
     let reportData = {};
-    
+
     switch (type) {
       case 'summary':
         reportData = await generateSummaryReport(start, end);
@@ -1815,7 +1889,7 @@ const getReports = async (req, res) => {
       default:
         reportData = await generateSummaryReport(start, end);
     }
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -1837,16 +1911,16 @@ const getReports = async (req, res) => {
 const getRecentActivities = async (req, res) => {
   try {
     const { limit = 50 } = req.query;
-    
+
     // Get recent activities from various collections
     const activities = [];
-    
+
     // Recent users
     const recentUsers = await User.find()
       .select('name email role createdAt')
       .sort({ createdAt: -1 })
       .limit(10);
-    
+
     recentUsers.forEach(user => {
       activities.push({
         type: 'user_registration',
@@ -1856,7 +1930,7 @@ const getRecentActivities = async (req, res) => {
         email: user.email
       });
     });
-    
+
     // Recent bookings
     const recentBookings = await Booking.find()
       .populate('user', 'name email')
@@ -1865,7 +1939,7 @@ const getRecentActivities = async (req, res) => {
       .select('receiptId status totalAmount createdAt')
       .sort({ createdAt: -1 })
       .limit(10);
-    
+
     recentBookings.forEach(booking => {
       activities.push({
         type: 'booking_created',
@@ -1876,14 +1950,14 @@ const getRecentActivities = async (req, res) => {
         status: booking.status
       });
     });
-    
+
     // Recent properties
     const recentProperties = await Property.find()
       .populate('host', 'name email')
       .select('title status createdAt')
       .sort({ createdAt: -1 })
       .limit(10);
-    
+
     recentProperties.forEach(property => {
       activities.push({
         type: 'property_created',
@@ -1893,11 +1967,11 @@ const getRecentActivities = async (req, res) => {
         status: property.status
       });
     });
-    
+
     // Sort all activities by timestamp and limit
     activities.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     const limitedActivities = activities.slice(0, parseInt(limit));
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -1919,7 +1993,7 @@ const getSystemHealth = async (req, res) => {
   try {
     // Check database connection
     const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-    
+
     // Get memory usage
     const memoryUsage = process.memoryUsage();
     const memoryUsageMB = {
@@ -1928,7 +2002,7 @@ const getSystemHealth = async (req, res) => {
       heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
       external: Math.round(memoryUsage.external / 1024 / 1024)
     };
-    
+
     // Get uptime
     const uptime = process.uptime();
     const uptimeFormatted = {
@@ -1937,11 +2011,11 @@ const getSystemHealth = async (req, res) => {
       hours: Math.floor(uptime / 3600),
       days: Math.floor(uptime / 86400)
     };
-    
+
     res.status(200).json({
       success: true,
       data: {
-      status: 'healthy', 
+        status: 'healthy',
         database: dbStatus,
         uptime: uptimeFormatted,
         memory: memoryUsageMB,
@@ -1984,7 +2058,7 @@ const generateSummaryReport = async (startDate, endDate) => {
     Booking.countDocuments({ status: 'completed', createdAt: { $gte: startDate, $lte: endDate } }),
     Booking.countDocuments({ status: 'cancelled', createdAt: { $gte: startDate, $lte: endDate } })
   ]);
-  
+
   return {
     period: { start: startDate, end: endDate },
     users: { total: totalUsers, new: newUsers, hosts: totalHosts },
@@ -2011,7 +2085,7 @@ const generateRevenueReport = async (startDate, endDate) => {
     },
     { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
   ]);
-  
+
   return {
     period: { start: startDate, end: endDate },
     dailyRevenue: revenueData,
@@ -2037,7 +2111,7 @@ const generateUserReport = async (startDate, endDate) => {
     },
     { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
   ]);
-  
+
   return {
     period: { start: startDate, end: endDate },
     dailyUsers: userData,
@@ -2051,12 +2125,12 @@ const generateUserReport = async (startDate, endDate) => {
 const getPaymentAuditDashboard = async (req, res) => {
   try {
     const { page = 1, limit = 50, severity, action } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (severity) filter['audit.severity'] = severity;
     if (action) filter['audit.action'] = action;
-    
+
     // Get audit logs
     const auditLogs = await PaymentAuditLog.find(filter)
       .populate('user', 'name email')
@@ -2066,13 +2140,13 @@ const getPaymentAuditDashboard = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     // Get summary stats
     const totalLogs = await PaymentAuditLog.countDocuments(filter);
     const validationFailures = await PaymentAuditLog.countDocuments({ 'validation.isValid': false });
     const criticalIssues = await PaymentAuditLog.countDocuments({ 'audit.severity': 'critical' });
     const highIssues = await PaymentAuditLog.countDocuments({ 'audit.severity': 'high' });
-    
+
     res.json({
       success: true,
       data: {
@@ -2103,7 +2177,7 @@ const getPaymentAuditDashboard = async (req, res) => {
 const getValidationFailures = async (req, res) => {
   try {
     const failures = await PaymentAuditLog.getValidationFailures(100);
-    
+
     res.json({
       success: true,
       data: failures
@@ -2121,9 +2195,9 @@ const getValidationFailures = async (req, res) => {
 const getPaymentAuditDetails = async (req, res) => {
   try {
     const { paymentId } = req.params;
-    
+
     const auditLogs = await PaymentAuditLog.getPaymentAuditLogs(paymentId);
-    
+
     res.json({
       success: true,
       data: auditLogs
@@ -2143,7 +2217,7 @@ const getPaymentAuditDetails = async (req, res) => {
 const adminSignup = async (req, res) => {
   try {
     const { name, email, phone, password, confirmPassword, secretKey } = req.body;
-     console.log(secretKey);
+    console.log(secretKey);
     // Validate secret key
     if (secretKey !== process.env.ADMIN_SIGNUP_SECRET_KEY) {
       return res.status(401).json({
@@ -2172,9 +2246,9 @@ const adminSignup = async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { 
-        id: admin._id, 
-        email: admin.email, 
+      {
+        id: admin._id,
+        email: admin.email,
         role: 'admin',
         name: admin.name
       },
@@ -2226,64 +2300,68 @@ const adminSignup = async (req, res) => {
 module.exports = {
   // Authentication
   adminSignup,
-  
+
   // Dashboard
   getDashboardStats,
-  
+
   // Platform Fee Management
   getCurrentPlatformFeeRate,
   updatePlatformFeeRate,
   getPlatformFeeHistory,
-  
+
   // Users
   getUsers,
   updateUserStatus,
   getUser,
   updateUser,
-  
+
   // Hosts
   getHosts,
   approveHost,
   rejectHost,
-  
+
   // Properties
   getProperties,
   approveListing,
   rejectListing,
-  
+
   // Bookings
   getBookings,
   refundBooking,
-  
+
   // KYC
   getKYC,
   getKYCById,
   verifyKYC,
   rejectKYC,
-  
+
   // Payments
   getPayments,
   processPayout,
-  
+
   // Reviews
   getReviews,
   flagReview,
   deleteReview,
-  
+
   // Settings
   getSettings,
   updateSettings,
-  
+
   // Analytics & Reports
   getAnalytics,
   getReports,
-  
+
   // System
   getRecentActivities,
   getSystemHealth,
-  
+
   // Payment Audit
   getPaymentAuditDashboard,
   getValidationFailures,
-  getPaymentAuditDetails
+  getPaymentAuditDetails,
+
+  // Featured & Sponsored
+  toggleFeatured,
+  toggleSponsored
 }; 

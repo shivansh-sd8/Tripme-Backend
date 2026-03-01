@@ -91,7 +91,7 @@ const normalizeOrigin = (url) => {
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [];
-    
+
     // Add FRONTEND_URL if set (handle comma-separated)
     if (process.env.FRONTEND_URL) {
       const urls = process.env.FRONTEND_URL.split(',')
@@ -99,7 +99,7 @@ const corsOptions = {
         .filter(url => url);
       allowedOrigins.push(...urls);
     }
-    
+
     // Add ALLOWED_ORIGINS if set (comma-separated list)
     if (process.env.ALLOWED_ORIGINS) {
       const additionalOrigins = process.env.ALLOWED_ORIGINS.split(',')
@@ -107,21 +107,21 @@ const corsOptions = {
         .filter(url => url);
       allowedOrigins.push(...additionalOrigins);
     }
-    
+
     // Allow requests with no origin (like mobile apps, Postman, or curl)
     if (!origin) {
       return callback(null, true);
     }
-    
+
     // Normalize the incoming origin
     const normalizedOrigin = normalizeOrigin(origin);
-    
+
     // Check if origin is in allowed list (case-insensitive comparison)
     const isAllowed = allowedOrigins.some(allowed => {
       const normalizedAllowed = normalizeOrigin(allowed);
       return normalizedAllowed && normalizedAllowed.toLowerCase() === normalizedOrigin.toLowerCase();
     });
-    
+
     if (isAllowed) {
       callback(null, true);
     } else {
@@ -190,7 +190,7 @@ app.get('/api/health', (req, res) => {
       total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024) + ' MB'
     }
   };
-  
+
   res.status(200).json(healthCheck);
 });
 
@@ -199,7 +199,7 @@ app.get('/api/public/platform-fee', async (req, res) => {
   try {
     const PricingConfig = require('./models/PricingConfig');
     const currentRate = await PricingConfig.getCurrentPlatformFeeRate();
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -245,7 +245,8 @@ app.use('/api/support', require('./routes/support.routes'));
 app.use('/api/upload', require('./routes/upload.routes'));
 app.use('/api/availability', require('./routes/availability.routes'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
-app.use('/api/email-subscription',require('./routes/emailSubscription.routes'));
+app.use('/api/email-subscription', require('./routes/emailSubscription.routes'));
+app.use('/api/popular-destinations', require('./routes/popularDestination.routes'));
 // Hourly booking routes moved to main booking routes
 
 // Note: Frontend is deployed separately

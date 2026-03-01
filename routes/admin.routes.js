@@ -7,6 +7,7 @@ const { validateLogin, validateAdminSignup } = require('../validations/auth.vali
 
 // Import admin controllers
 const adminController = require('../controllers/admin.controller');
+const popularDestController = require('../controllers/popularDestination.controller');
 
 // Public admin routes (no authentication required)
 router.post('/signup', validateAdminSignup, adminController.adminSignup);
@@ -44,6 +45,8 @@ router.put('/hosts/:hostId/reject', adminController.rejectHost);
 router.get('/properties', adminController.getProperties);
 router.put('/listings/:listingId/approve', adminController.approveListing);
 router.put('/listings/:listingId/reject', adminController.rejectListing);
+router.patch('/properties/:id/featured', adminController.toggleFeatured);
+router.patch('/properties/:id/sponsored', adminController.toggleSponsored);
 
 // Booking management routes
 router.get('/bookings', adminController.getBookings);
@@ -80,5 +83,13 @@ router.get('/system/health', adminController.getSystemHealth);
 router.get('/audit/payments', adminController.getPaymentAuditDashboard);
 router.get('/audit/validation-failures', adminController.getValidationFailures);
 router.get('/audit/payments/:paymentId', adminController.getPaymentAuditDetails);
+
+// Popular Destinations management routes
+router.get('/popular-destinations', popularDestController.getAdminDestinations);
+router.post('/popular-destinations', popularDestController.createDestination);
+router.put('/popular-destinations/:id', popularDestController.updateDestination);
+router.delete('/popular-destinations/:id', popularDestController.deleteDestination);
+router.patch('/popular-destinations/:id/toggle', popularDestController.toggleActive);
+router.patch('/popular-destinations/reorder', popularDestController.reorderDestinations);
 
 module.exports = router;
