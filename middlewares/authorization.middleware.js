@@ -327,9 +327,9 @@ const canAccessReview = async (req, res, next) => {
       });
     }
 
-    // User can access if they are the reviewer, reviewed user, or admin
+    // User can access if they are the reviewer, reviewed host, or admin
     const isReviewer = review.reviewer.toString() === req.user._id.toString();
-    const isReviewedUser = review.reviewedUser.toString() === req.user._id.toString();
+    const isReviewedUser = review.host?.toString() === req.user._id.toString();
     const isAdmin = req.user.role === 'admin';
 
     if (!isReviewer && !isReviewedUser && !isAdmin) {

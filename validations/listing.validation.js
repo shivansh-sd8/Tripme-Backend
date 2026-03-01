@@ -358,6 +358,18 @@ houseRules: Joi.object({
         url: Joi.string().uri().optional().allow('').messages({
           'string.uri': 'Image URL must be a valid URI'
         }),
+         category: Joi.string()
+        .valid(
+          "Living room",
+          "Bedroom",
+          "Kitchen",
+          "Bathroom",
+          "Exterior",
+          "Amenities",
+          "Other"
+        )
+        .optional()
+        .default("Other"),
         publicId: Joi.string().optional().allow(''),
         isPrimary: Joi.boolean().optional(),
         caption: Joi.string().optional().allow(''),

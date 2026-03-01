@@ -363,7 +363,9 @@ const getKYCRequirements = async (req, res) => {
 const verifyKYC = async (req, res) => {
   try {
     const { userId } = req.params;
+    console.log("🚀 ~ verifyKYC ~ userId:", req.body)
     const { status, rejectionReason } = req.body;
+
 
     const user = await User.findById(userId);
     if (!user) {

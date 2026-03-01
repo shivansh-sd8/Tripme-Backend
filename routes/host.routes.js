@@ -19,6 +19,6 @@ router.post('/profile/image', (req, res) => {
   res.status(501).json({ success: false, message: 'Image upload not implemented yet' });
 });
 
-// router.get('/:id', hostController.getHostProfile);
+router.get('/profile/:id', hostController.getHostProfile);
 
 module.exports = router; 

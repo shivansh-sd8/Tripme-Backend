@@ -35,6 +35,10 @@ const hostSchema = new mongoose.Schema({
     min: 0,
     max: 5
   },
+  savedListings: [{
+  type: mongoose.Schema.Types.ObjectId,
+  ref: 'Property'
+}],
   totalBookings: {
     type: Number,
     default: 0

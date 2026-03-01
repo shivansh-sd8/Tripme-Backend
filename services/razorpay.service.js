@@ -5,6 +5,7 @@
 
 let razorpayInstance = null;
 const Razorpay = require('razorpay');
+const crypto = require('crypto');
 function initializeRazorpay() {
   const keyId = process.env.RAZORPAY_KEY_ID;
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
@@ -91,8 +92,6 @@ async function fetchPaymentStatus(paymentId) {
 // }
 
 function verifyPayment(orderId, paymentId, signature) {
-    const crypto = require('crypto');
-  
     const generatedSignature = crypto
       .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
       .update(`${orderId}|${paymentId}`)
@@ -100,6 +99,59 @@ function verifyPayment(orderId, paymentId, signature) {
   
     return generatedSignature === signature;
   }
+
+function verifyWebhookSignature(payload, signature) {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret || !signature || !payload) {
+    return false;
+  }
+
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(payload)
+    .digest('hex');
+
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(expected, 'hex'),
+      Buffer.from(signature, 'hex')
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+async function createRefund(paymentId, amount, notes = '', meta = {}) {
+  if (!isInitialized()) {
+    initializeRazorpay();
+    if (!isInitialized()) {
+      throw new Error('Razorpay not initialized');
+    }
+  }
+
+  const amountPaise = Math.round(Number(amount) * 100);
+  if (!Number.isFinite(amountPaise) || amountPaise <= 0) {
+    throw new Error('Invalid refund amount');
+  }
+
+  const refund = await razorpayInstance.payments.refund(paymentId, {
+    amount: amountPaise,
+    speed: 'normal',
+    notes: {
+      reason: notes || 'TripMe refund',
+      ...meta
+    }
+  });
+
+  return {
+    refundId: refund.id,
+    amount: (refund.amount || 0) / 100,
+    currency: refund.currency,
+    status: refund.status,
+    paymentId: refund.payment_id,
+    rawRefund: refund
+  };
+}
 
 
   async function getPaymentDetails(paymentId) {
@@ -125,5 +177,7 @@ module.exports = {
   createOrder,
   fetchPaymentStatus,
   verifyPayment,
-  getPaymentDetails
+  getPaymentDetails,
+  verifyWebhookSignature,
+  createRefund
 };
