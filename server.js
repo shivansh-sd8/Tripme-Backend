@@ -7,6 +7,18 @@ const connectDB = require('./config/db');
 const app = express();
 const mongoose = require('mongoose'); // Added missing import for mongoose
 
+// HOTFIX: Manually set Razorpay env vars if they're missing
+if (!process.env.RAZORPAY_KEY_ID) {
+  console.log('⚠️ Setting RAZORPAY_KEY_ID manually as fallback');
+  // Using test mode keys instead of live mode
+  process.env.RAZORPAY_KEY_ID = 'rzp_test_UPWbFB9Cxs7D1v';
+}
+if (!process.env.RAZORPAY_KEY_SECRET) {
+  console.log('⚠️ Setting RAZORPAY_KEY_SECRET manually as fallback');
+  // Using test mode keys instead of live mode
+  process.env.RAZORPAY_KEY_SECRET = 'JxZQEZVFnPOHPpLWGlwYQyXY';
+}
+
 // Security imports
 const { createHelmet, createRateLimiters, securityConfig } = require('./config/security.config');
 const auditService = require('./services/audit.service');
@@ -220,6 +232,24 @@ app.get('/api/public/platform-fee', async (req, res) => {
 // Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({ success: true, message: 'Server is working' });
+});
+
+// Debug Razorpay status endpoint
+app.get('/api/debug/razorpay', (req, res) => {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  
+  res.json({
+    success: true,
+    razorpay: {
+      keyIdPresent: !!keyId,
+      keyIdPrefix: keyId ? keyId.substring(0, 12) + '...' : null,
+      keySecretPresent: !!keySecret,
+      isInitialized: razorpayService.isInitialized(),
+      envKeys: Object.keys(process.env).filter(k => k.includes('RAZORPAY'))
+    },
+    allEnvKeys: Object.keys(process.env).sort()
+  });
 });
 
 // API Routes

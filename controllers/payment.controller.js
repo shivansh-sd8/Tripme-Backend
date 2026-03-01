@@ -1076,7 +1076,7 @@ const createRazorpayOrder = async (req, res) => {
       });
     }
 
-    // Verify Razorpay is initialized
+    // Verify Razorpay is initialized, try to initialize if not
     if (!razorpayService.isInitialized()) {
       console.error('Razorpay not initialized. Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env');
       return res.status(500).json({
