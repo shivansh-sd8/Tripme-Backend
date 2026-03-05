@@ -9,6 +9,26 @@ const pricingConfigSchema = new mongoose.Schema({
     max: 1, // 0-100% (0.15 = 15%)
     default: 0.15
   },
+  // GST applied on subtotal (0-1)
+  gstRate: {
+    type: Number,
+    min: 0,
+    max: 1,
+    default: 0.18
+  },
+  // Card/UPI processing fee (percentage, 0-1)
+  processingFeeRate: {
+    type: Number,
+    min: 0,
+    max: 1,
+    default: 0.029
+  },
+  // Fixed processing fee (in rupees)
+  processingFeeFixed: {
+    type: Number,
+    min: 0,
+    default: 30
+  },
   
   // Configuration metadata
   isActive: {
@@ -80,8 +100,52 @@ pricingConfigSchema.statics.getCurrentPlatformFeeRate = async function() {
   return activeConfig.platformFeeRate;
 };
 
+// Get full current pricing config (platform, gst, processing)
+pricingConfigSchema.statics.getCurrentPricingConfig = async function() {
+  const now = new Date();
+  const activeConfig = await this.findOne({
+    isActive: true,
+    effectiveFrom: { $lte: now },
+    $or: [
+      { effectiveTo: null },
+      { effectiveTo: { $gte: now } }
+    ]
+  }).sort({ effectiveFrom: -1 });
+
+  if (!activeConfig) {
+    console.warn('⚠️ No active pricing config found, using defaults (15%, 18% GST, 2.9% + ₹30 processing).');
+    return {
+      platformFeeRate: 0.15,
+      gstRate: 0.18,
+      processingFeeRate: 0.029,
+      processingFeeFixed: 30
+    };
+  }
+
+  return {
+    platformFeeRate: activeConfig.platformFeeRate,
+    gstRate: activeConfig.gstRate ?? 0.18,
+    processingFeeRate: activeConfig.processingFeeRate ?? 0.029,
+    processingFeeFixed: activeConfig.processingFeeFixed ?? 30
+  };
+};
+
 // Static method to create new platform fee configuration
-pricingConfigSchema.statics.updatePlatformFeeRate = async function(newRate, adminUserId, changeReason = '') {
+pricingConfigSchema.statics.updatePlatformFeeRate = async function(
+  newRate,
+  adminUserId,
+  changeReason = '',
+  options = {}
+) {
+  // Preserve existing ancillary rates if not provided
+  const current = await this.getCurrentPricingConfig();
+  const nextConfig = {
+    platformFeeRate: newRate,
+    gstRate: options.gstRate !== undefined ? options.gstRate : current.gstRate,
+    processingFeeRate: options.processingFeeRate !== undefined ? options.processingFeeRate : current.processingFeeRate,
+    processingFeeFixed: options.processingFeeFixed !== undefined ? options.processingFeeFixed : current.processingFeeFixed
+  };
+
   // Deactivate current active configs
   await this.updateMany(
     { isActive: true },
@@ -94,7 +158,7 @@ pricingConfigSchema.statics.updatePlatformFeeRate = async function(newRate, admi
   
   // Create new active config
   const newConfig = new this({
-    platformFeeRate: newRate,
+    ...nextConfig,
     isActive: true,
     effectiveFrom: new Date(),
     effectiveTo: null,

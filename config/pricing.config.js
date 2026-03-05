@@ -12,7 +12,7 @@ const PRICING_CONFIG = {
   PROCESSING_FEE_RATE: 0.029, // 2.9% processing fee
   PROCESSING_FEE_FIXED: 30, // ₹30 fixed processing fee
   
-  // Tax rates
+  // Tax rates (fallback/defaults, overridable via PricingConfig)
   GST_RATE: 0.18, // 18% GST (Goods and Services Tax)
   
   // Default service fees (if not set by host)

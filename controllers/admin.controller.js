@@ -90,13 +90,18 @@ const getDashboardStats = async (req, res) => {
 // Platform Fee Management
 const getCurrentPlatformFeeRate = async (req, res) => {
   try {
-    const currentRate = await PricingConfig.getCurrentPlatformFeeRate();
+    const currentConfig = await PricingConfig.getCurrentPricingConfig();
 
     res.status(200).json({
       success: true,
       data: {
-        platformFeeRate: currentRate,
-        platformFeePercentage: (currentRate * 100).toFixed(1),
+        platformFeeRate: currentConfig.platformFeeRate,
+        platformFeePercentage: (currentConfig.platformFeeRate * 100).toFixed(1),
+        gstRate: currentConfig.gstRate,
+        gstPercentage: (currentConfig.gstRate * 100).toFixed(1),
+        processingFeeRate: currentConfig.processingFeeRate,
+        processingFeePercentage: (currentConfig.processingFeeRate * 100).toFixed(2),
+        processingFeeFixed: currentConfig.processingFeeFixed,
         lastUpdated: new Date()
       }
     });
@@ -112,9 +117,10 @@ const getCurrentPlatformFeeRate = async (req, res) => {
 
 const updatePlatformFeeRate = async (req, res) => {
   try {
-    const { platformFeeRate, changeReason } = req.body;
+    const { platformFeeRate, gstRate, processingFeeRate, processingFeeFixed, changeReason } = req.body;
 
-    if (!platformFeeRate || typeof platformFeeRate !== 'number') {
+    // Allow zero: only reject when missing or NaN
+    if (platformFeeRate === undefined || platformFeeRate === null || Number.isNaN(platformFeeRate) || typeof platformFeeRate !== 'number') {
       return res.status(400).json({
         success: false,
         message: 'Platform fee rate is required and must be a number'
@@ -127,33 +133,52 @@ const updatePlatformFeeRate = async (req, res) => {
         message: 'Platform fee rate must be between 0 and 1 (0-100%)'
       });
     }
+    if (gstRate !== undefined && (gstRate < 0 || gstRate > 1)) {
+      return res.status(400).json({ success: false, message: 'GST rate must be between 0 and 1 (0-100%)' });
+    }
+    if (processingFeeRate !== undefined && (processingFeeRate < 0 || processingFeeRate > 1)) {
+      return res.status(400).json({ success: false, message: 'Processing fee rate must be between 0 and 1 (0-100%)' });
+    }
+    if (processingFeeFixed !== undefined && processingFeeFixed < 0) {
+      return res.status(400).json({ success: false, message: 'Processing fee fixed must be >= 0' });
+    }
 
-    const currentRate = await PricingConfig.getCurrentPlatformFeeRate();
+    const currentConfig = await PricingConfig.getCurrentPricingConfig();
 
-    if (Math.abs(currentRate - platformFeeRate) < 0.001) {
+    if (Math.abs(currentConfig.platformFeeRate - platformFeeRate) < 0.001 &&
+        (gstRate === undefined || Math.abs(currentConfig.gstRate - gstRate) < 0.001) &&
+        (processingFeeRate === undefined || Math.abs(currentConfig.processingFeeRate - processingFeeRate) < 0.001) &&
+        (processingFeeFixed === undefined || Math.abs(currentConfig.processingFeeFixed - processingFeeFixed) < 0.001)) {
       return res.status(400).json({
         success: false,
-        message: 'New platform fee rate is the same as current rate'
+        message: 'New rates are the same as current rates'
       });
     }
 
     const newConfig = await PricingConfig.updatePlatformFeeRate(
       platformFeeRate,
       req.user._id,
-      changeReason || 'Platform fee rate updated via admin panel'
+      changeReason || 'Platform fee rate updated via admin panel',
+      { gstRate, processingFeeRate, processingFeeFixed }
     );
 
     const adminName = req.user?.name || req.user?.email || 'Unknown Admin';
-    console.log(`✅ Platform fee rate updated from ${(currentRate * 100).toFixed(1)}% to ${(platformFeeRate * 100).toFixed(1)}% by admin ${adminName}`);
+    console.log(`✅ Platform fee updated by admin ${adminName}: platform ${(platformFeeRate * 100).toFixed(1)}%, GST ${( (gstRate ?? currentConfig.gstRate) * 100).toFixed(1)}%, processing ${( (processingFeeRate ?? currentConfig.processingFeeRate) * 100).toFixed(2)}% + ₹${(processingFeeFixed ?? currentConfig.processingFeeFixed)}`);
 
     res.status(200).json({
       success: true,
-      message: 'Platform fee rate updated successfully',
+      message: 'Platform fee configuration updated successfully',
       data: {
-        previousRate: currentRate,
-        newRate: platformFeeRate,
-        previousPercentage: (currentRate * 100).toFixed(1),
-        newPercentage: (platformFeeRate * 100).toFixed(1),
+        previous: currentConfig,
+        newConfig: {
+          platformFeeRate: platformFeeRate,
+          platformFeePercentage: (platformFeeRate * 100).toFixed(1),
+          gstRate: gstRate ?? currentConfig.gstRate,
+          gstPercentage: ((gstRate ?? currentConfig.gstRate) * 100).toFixed(1),
+          processingFeeRate: processingFeeRate ?? currentConfig.processingFeeRate,
+          processingFeePercentage: ((processingFeeRate ?? currentConfig.processingFeeRate) * 100).toFixed(2),
+          processingFeeFixed: processingFeeFixed ?? currentConfig.processingFeeFixed,
+        },
         changeReason: changeReason,
         updatedBy: adminName,
         updatedAt: newConfig.createdAt
@@ -1695,13 +1720,18 @@ const deleteReview = async (req, res) => {
 // Settings Management Functions
 const getSettings = async (req, res) => {
   try {
-    // Get current platform fee rate
-    const platformFeeRate = await PricingConfig.getCurrentPlatformFeeRate();
+    // Get current pricing config
+    const feeConfig = await PricingConfig.getCurrentPricingConfig();
 
     // Get system settings (you can expand this based on your needs)
     const settings = {
-      platformFeeRate,
-      platformFeePercentage: (platformFeeRate * 100).toFixed(1),
+      platformFeeRate: feeConfig.platformFeeRate,
+      platformFeePercentage: (feeConfig.platformFeeRate * 100).toFixed(1),
+      gstRate: feeConfig.gstRate,
+      gstPercentage: (feeConfig.gstRate * 100).toFixed(1),
+      processingFeeRate: feeConfig.processingFeeRate,
+      processingFeePercentage: (feeConfig.processingFeeRate * 100).toFixed(2),
+      processingFeeFixed: feeConfig.processingFeeFixed,
       maintenanceMode: false,
       registrationEnabled: true,
       hostRegistrationEnabled: true,
@@ -1730,26 +1760,42 @@ const getSettings = async (req, res) => {
 
 const updateSettings = async (req, res) => {
   try {
-    const { platformFeeRate, maintenanceMode, registrationEnabled, hostRegistrationEnabled } = req.body;
+    const {
+      platformFeeRate,
+      gstRate,
+      processingFeeRate,
+      processingFeeFixed,
+      maintenanceMode,
+      registrationEnabled,
+      hostRegistrationEnabled
+    } = req.body;
 
     const updates = {};
     if (typeof maintenanceMode === 'boolean') updates.maintenanceMode = maintenanceMode;
     if (typeof registrationEnabled === 'boolean') updates.registrationEnabled = registrationEnabled;
     if (typeof hostRegistrationEnabled === 'boolean') updates.hostRegistrationEnabled = hostRegistrationEnabled;
 
-    // Update platform fee rate if provided
-    if (platformFeeRate && typeof platformFeeRate === 'number') {
-      if (platformFeeRate < 0 || platformFeeRate > 1) {
-        return res.status(400).json({
-          success: false,
-          message: 'Platform fee rate must be between 0 and 1 (0-100%)'
-        });
+    // Update platform/fee rates if provided (allow zero)
+    const hasFeeUpdate = [platformFeeRate, gstRate, processingFeeRate, processingFeeFixed].some(v => v !== undefined && v !== null);
+    if (hasFeeUpdate) {
+      if (platformFeeRate !== undefined && (platformFeeRate < 0 || platformFeeRate > 1)) {
+        return res.status(400).json({ success: false, message: 'Platform fee rate must be between 0 and 1 (0-100%)' });
+      }
+      if (gstRate !== undefined && (gstRate < 0 || gstRate > 1)) {
+        return res.status(400).json({ success: false, message: 'GST rate must be between 0 and 1 (0-100%)' });
+      }
+      if (processingFeeRate !== undefined && (processingFeeRate < 0 || processingFeeRate > 1)) {
+        return res.status(400).json({ success: false, message: 'Processing fee rate must be between 0 and 1 (0-100%)' });
+      }
+      if (processingFeeFixed !== undefined && processingFeeFixed < 0) {
+        return res.status(400).json({ success: false, message: 'Processing fee fixed must be >= 0' });
       }
 
       await PricingConfig.updatePlatformFeeRate(
-        platformFeeRate,
+        platformFeeRate ?? (await PricingConfig.getCurrentPricingConfig()).platformFeeRate,
         req.user._id,
-        'Platform fee rate updated via admin settings'
+        'Platform fee rate updated via admin settings',
+        { gstRate, processingFeeRate, processingFeeFixed }
       );
     }
 

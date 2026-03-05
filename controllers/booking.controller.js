@@ -61,6 +61,171 @@ function formatLocalDate(date) {
   return date.toLocaleDateString('en-CA'); // YYYY-MM-DD
 
 }
+// @desc    Pre-validate booking BEFORE payment — ensures nothing fails after money is charged
+// @route   POST /api/bookings/pre-validate
+// @access  Private
+const preValidateBooking = async (req, res) => {
+  try {
+    const {
+      propertyId,
+      listingId,
+      serviceId,
+      checkIn,
+      checkOut,
+      checkInDateTime,
+      bookingDuration,
+      guests,
+      hourlyExtension,
+      extensionHours,
+      isLateCheckIn,
+    } = req.body;
+
+    const actualListingId = listingId || propertyId;
+
+    if (actualListingId && serviceId) {
+      return res.status(400).json({ success: false, message: 'Cannot book both listing and service' });
+    }
+    if (!actualListingId && !serviceId) {
+      return res.status(400).json({ success: false, message: 'Either propertyId or serviceId is required' });
+    }
+
+    // ── 1. Load listing / service ──────────────────────────────────────────────
+    let listing = null;
+    let service = null;
+
+    if (actualListingId) {
+      listing = await Property.findById(actualListingId);
+      if (!listing) return res.status(404).json({ success: false, message: 'Property not found' });
+    } else {
+      service = await require('../models/Service').findById(serviceId);
+      if (!service) return res.status(404).json({ success: false, message: 'Service not found' });
+    }
+
+    const is24HourBooking = bookingDuration === '24hour';
+
+    // ── 2. Security validation (booking parameters) ────────────────────────────
+    const requested24Hour = bookingDuration === '24hour';
+    const isLateCheckInFlag = isLateCheckIn === true;
+    const basePriceForValidation = requested24Hour
+      ? (listing?.pricing?.basePrice24Hour || listing?.pricing?.basePrice || service?.pricing?.basePrice)
+      : (isLateCheckInFlag && listing?.pricing?.basePrice24Hour)
+        ? listing.pricing.basePrice24Hour
+        : (listing?.pricing?.basePrice || service?.pricing?.basePrice);
+
+    const bookingValidation = require('../utils/paymentSecurity').validateBookingParameters({
+      checkIn,
+      checkOut,
+      checkInDateTime,
+      bookingDuration,
+      guests,
+      basePrice: basePriceForValidation,
+      hourlyExtension: requested24Hour ? { hours: extensionHours || 0 } : hourlyExtension,
+      extensionHours,
+    });
+
+    if (!bookingValidation.isValid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid booking parameters',
+        errors: bookingValidation.errors,
+      });
+    }
+
+    // ── 3. 24-hour specific validation ────────────────────────────────────────
+    if (is24HourBooking && listing) {
+      const ensureDate = (val) => {
+        if (!val) return null;
+        const d = val instanceof Date ? val : new Date(val);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      const checkInDateTimeObj = ensureDate(checkInDateTime);
+      if (!checkInDateTimeObj) {
+        return res.status(400).json({ success: false, message: 'checkInDateTime is required for 24-hour booking' });
+      }
+
+      const totalHours = calculateTotalHours(24, extensionHours || 0);
+      const validation = validate24HourBooking({
+        checkInDateTime: checkInDateTimeObj,
+        totalHours,
+        minHours: listing.availabilitySettings?.minBookingHours || 23,
+        maxHours: listing.availabilitySettings?.maxBookingHours || 168,
+      });
+
+      if (!validation.isValid) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid 24-hour booking parameters',
+          errors: validation.errors,
+        });
+      }
+
+      // Check time-slot availability for 24-hour booking
+      const checkOutDateTime = calculateCheckoutTime(checkInDateTimeObj, totalHours);
+      const isAvailable = await AvailabilityService.isTimeSlotAvailable(
+        actualListingId,
+        checkInDateTimeObj,
+        checkOutDateTime
+      );
+
+      if (!isAvailable) {
+        return res.status(400).json({ success: false, message: 'Selected time slot is not available' });
+      }
+    }
+
+    // ── 4. Daily booking: check that nights > 0 ───────────────────────────────
+    if (!is24HourBooking && listing) {
+      const ensureDate = (val) => { const d = new Date(val); return isNaN(d.getTime()) ? null : d; };
+      const checkInDate = ensureDate(checkIn);
+      const checkOutDate = ensureDate(checkOut);
+      if (checkInDate && checkOutDate) {
+        const cinOnly = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+        const coutOnly = new Date(checkOutDate.getFullYear(), checkOutDate.getMonth(), checkOutDate.getDate());
+        const nights = (coutOnly - cinOnly) / (1000 * 60 * 60 * 24);
+        if (nights <= 0) {
+          return res.status(400).json({ success: false, message: 'Check-out must be after check-in (at least 1 night)' });
+        }
+      }
+    }
+
+    // ── 5. Issue a short-lived validation token (signed, cannot be forged) ────
+    const crypto = require('crypto');
+    const tokenPayload = JSON.stringify({
+      userId: req.user._id.toString(),
+      listingId: actualListingId || serviceId,
+      checkIn,
+      checkOut,
+      bookingDuration: bookingDuration || 'daily',
+      guests,
+      ts: Date.now(),
+    });
+    const validationToken = crypto
+      .createHmac('sha256', process.env.JWT_SECRET)
+      .update(tokenPayload)
+      .digest('hex');
+
+    console.log(`✅ Pre-validation passed for user ${req.user._id} | property ${actualListingId}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Booking pre-validation successful — safe to proceed with payment',
+      data: {
+        validationToken,
+        expiresAt: new Date(Date.now() + 20 * 60 * 1000).toISOString(), // 20 minutes
+        bookingDuration: bookingDuration || 'daily',
+        is24HourBooking,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Pre-validate booking error:', error);
+    return res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Pre-validation failed',
+      errors: error.errors,
+    });
+  }
+};
+
 // @desc    Process payment and create booking (new flow)
 // @route   POST /api/bookings/process-payment
 // @access  Private
@@ -292,8 +457,8 @@ const processPaymentAndCreateBooking = async (req, res) => {
             err.status = 400;
             throw err;
           }
-          // 24-hour booking logic
-          totalHours = calculateTotalHours(23, extensionHours || 0);
+          // 24-hour booking logic — base is 24 hours (not 23)
+          totalHours = calculateTotalHours(24, extensionHours || 0);
           const checkOutDateTime = calculateCheckoutTime(checkInDateTimeObj, totalHours);
 
           // Validate 24-hour booking parameters
@@ -4839,7 +5004,10 @@ module.exports = {
 
   // Legacy aliases for backward compatibility
   getBooking,
-  getBookingStats
+  getBookingStats,
+
+  // Pre-payment validation (run all checks BEFORE charging)
+  preValidateBooking
 };
 
 

@@ -44,20 +44,23 @@ const registerUser = async (req, res) => {
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
     });
 
-    // Send verification email
-    // Use frontend URL for verification - the frontend will handle the API call
+    // Send verification email (non-blocking with timeout to avoid slowing registration on cold deploys)
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     const verificationUrl = `${frontendUrl}/auth/verify-email?token=${verificationToken}`;
     console.log('Sending welcome email to:', user.email);
     console.log('Verification URL:', verificationUrl);
-    
-    try {
-      const emailResult = await sendWelcomeEmail(user.email, user.name, verificationUrl);
-      console.log('Welcome email sent successfully:', emailResult);
-    } catch (emailError) {
-      console.error('Failed to send welcome email:', emailError);
-      // Don't fail the registration if email fails
-    }
+
+    const sendEmailWithTimeout = async () => {
+      const timeoutMs = 5000;
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Email send timeout')), timeoutMs)
+      );
+      return Promise.race([sendWelcomeEmail(user.email, user.name, verificationUrl), timeout]);
+    };
+
+    sendEmailWithTimeout()
+      .then((emailResult) => console.log('Welcome email sent (async):', emailResult))
+      .catch((emailError) => console.warn('Welcome email send skipped/failed (non-blocking):', emailError.message));
     
     // User starts as unverified - they must verify their email
     // user.isVerified = false; // This is the default value
