@@ -6,9 +6,12 @@ const { generateToken } = require('../utils/generateToken');
 const { sendEmail, sendWelcomeEmail, sendPasswordResetEmail } = require('../utils/sendEmail');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-// Google OAuth client - not needed for access token approach
-// const { OAuth2Client } = require('google-auth-library');
-// const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+// Google OAuth client (used instead of global fetch so it works on Node 16 too)
+const { OAuth2Client } = require('google-auth-library');
+const googleClient = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET
+);
 
 // @desc    Register user
 // @route   POST /api/auth/register
@@ -443,17 +446,16 @@ const socialLogin = async (req, res) => {
         console.log('Token length:', token ? token.length : 0);
         console.log('Token preview:', token ? token.substring(0, 20) + '...' : 'No token');
         
-        // Fetch user info using the access token
-        const googleApiUrl = `https://www.googleapis.com/oauth2/v2/userinfo?access_token=${token}`;
-        console.log('Calling Google API:', googleApiUrl);
-        
-        const userInfoResponse = await fetch(googleApiUrl);
-        
+        // Fetch user info using Google client (works without global fetch)
+        const userInfoResponse = await googleClient.request({
+          url: 'https://www.googleapis.com/oauth2/v2/userinfo',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
         console.log('Google API response status:', userInfoResponse.status);
-        console.log('Google API response headers:', Object.fromEntries(userInfoResponse.headers.entries()));
         
-        if (!userInfoResponse.ok) {
-          const errorText = await userInfoResponse.text();
+        if (userInfoResponse.status !== 200) {
+          const errorText = JSON.stringify(userInfoResponse.data);
           console.error('Google API error response:', errorText);
           return res.status(401).json({
             success: false,
@@ -462,7 +464,7 @@ const socialLogin = async (req, res) => {
           });
         }
         
-        const userInfo = await userInfoResponse.json();
+        const userInfo = userInfoResponse.data;
         console.log('Google API user info received:', {
           hasEmail: !!userInfo.email,
           hasName: !!userInfo.name,
