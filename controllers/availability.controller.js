@@ -2051,6 +2051,96 @@ const checkTimeSlotAvailability = async (req, res) => {
       },
       status: { $in: ['booked', 'blocked', 'maintenance', 'unavailable', 'available', 'partially-available','on-hold'] }
     }).populate('bookedBy', 'checkOut checkOutTime');
+
+    // ── DIRECT BOOKING OVERLAP CHECK ─────────────────────────────────────────
+    // The Availability table only records the BLOCKED dates (check-in date and
+    // intermediate dates). The checkout date often has a pre-existing 'available'
+    // record with no bookedBy link. So we MUST query the Booking collection
+    // directly to enforce the maintenance-buffer rule on checkout day.
+    //
+    // KEY: checkOut in Booking is stored as midnight UTC of the local checkout DATE
+    //      (e.g., Mar 9 5PM IST stored as 2026-03-09T00:00:00.000Z).
+    //      We must query by the calendar date of the new check-in, not exact datetime.
+    const Booking = require('../models/Booking');
+
+    // Get the calendar date of the new check-in in UTC
+    const checkInDayStart = new Date(Date.UTC(
+      checkInDate.getUTCFullYear(), checkInDate.getUTCMonth(), checkInDate.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    const checkInDayEnd = new Date(Date.UTC(
+      checkInDate.getUTCFullYear(), checkInDate.getUTCMonth(), checkInDate.getUTCDate(),
+      23, 59, 59, 999
+    ));
+
+    const overlappingBookings = await Booking.find({
+      property: propertyId,
+      status: { $in: ['pending', 'paid', 'confirmed'] },
+      // Match bookings whose checkout DATE (stored as midnight UTC) falls on the same calendar day
+      // as the new check-in date — these are the bookings that could still be occupying the property.
+      checkOut: { $gte: checkInDayStart, $lte: checkInDayEnd }
+    }).select('checkOut checkOutTime checkIn status');
+
+    for (const existingBooking of overlappingBookings) {
+      // checkOut is stored as midnight UTC of the local date.
+      // checkOutTime (e.g. "17:00") is in IST (UTC+5:30).
+      // To get the correct UTC timestamp: parse the UTC date, add the IST hours, subtract 5:30 offset.
+      const coDate = new Date(existingBooking.checkOut); // midnight UTC of checkout calendar day
+      const [coH, coM] = (existingBooking.checkOutTime || '17:00').split(':').map(Number);
+      const safeCoH = isNaN(coH) ? 15 : coH;
+      const safeCoM = isNaN(coM) ? 0 : coM;
+
+      // Compute UTC checkout time: midnight UTC of the day + IST hours - 5:30h offset
+      const checkoutUTC = new Date(
+        coDate.getTime()
+        + safeCoH * 60 * 60 * 1000
+        + safeCoM * 60 * 1000
+        - (5 * 60 + 30) * 60 * 1000   // subtract IST offset to get UTC
+      );
+      const maintEndUTC = new Date(checkoutUTC.getTime() + maintenanceHours * 60 * 60 * 1000);
+
+      console.log(`🔍 Booking overlap check (direct Booking query):`, {
+        existingBookingId: existingBooking._id,
+        checkOutStored: coDate.toISOString(),
+        checkOutTime: existingBooking.checkOutTime,
+        checkoutUTC: checkoutUTC.toISOString(),
+        maintenanceEnd: maintEndUTC.toISOString(),
+        newCheckIn: checkInDate.toISOString(),
+        blocked: checkInDate < maintEndUTC
+      });
+
+      if (checkInDate < maintEndUTC) {
+        // Format as IST time for the message (matches MobileBookingBar regex: /after\s+([\d:]+\s*[AP]M)/i)
+        const maintEndIST = new Date(maintEndUTC.getTime() + (5 * 60 + 30) * 60 * 1000);
+        const h = maintEndIST.getUTCHours();
+        const period = h >= 12 ? 'PM' : 'AM';
+        const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+        const maintEndStr = `${h12}:00 ${period}`;
+
+        return res.status(200).json({
+          success: true,
+          data: {
+            available: false,
+            checkIn: checkInDate.toISOString(),
+            checkOut: checkOutDate.toISOString(),
+            extensionHours,
+            maintenanceEnd: maintEndUTC.toISOString(),
+            conflicts: {
+              hourlyConflicts: [],
+              dailyConflicts: [{
+                date: checkoutUTC,
+                reason: `Property not available. Check-in not available until after ${maintEndStr}`
+              }]
+            },
+            // IMPORTANT: message must contain "after X:XX AM/PM" to match MobileBookingBar regex
+            message: `Check-in not available. Available after ${maintEndStr} (previous guest + ${maintenanceHours}h buffer)`
+          }
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+
     
     // Create a map of dates that have explicit availability records
     const availabilityMap = new Map();
@@ -2231,10 +2321,14 @@ const checkTimeSlotAvailability = async (req, res) => {
       }
     }
 
-    // Filter out checkout dates where check-in is after maintenance end
+    // Filter out checkout dates where check-in is AFTER maintenance end.
+    // There are two kinds of checkout-day slots:
+    //   a) DB slots with slot.bookedBy.checkOut populated  (old path)
+    //   b) Synthetic 'partially-available' slots added from checkoutDatesMap (no bookedBy)
+    //      → these carry slot.maintenance.availableAfter which is checkoutTime + bufferHours
     const now = new Date();
     const filteredDailyAvailability = dailyAvailability.filter(slot => {
-      // If this is a checkout date and check-in is after maintenance end, ignore it
+      // ── Path (a): DB slot with bookedBy populated ──────────────────────────
       if (slot.bookedBy && slot.bookedBy.checkOut) {
         const checkoutDate = new Date(slot.bookedBy.checkOut);
         const checkoutDateStr = checkoutDate.toISOString().split('T')[0];
@@ -2255,14 +2349,13 @@ const checkTimeSlotAvailability = async (req, res) => {
           
           const maintenanceEndTime = new Date(checkoutTime.getTime() + maintenanceHours * 60 * 60 * 1000);
           
-          console.log(`🔍 Checking checkout date conflict:`, {
+          console.log(`🔍 Checking checkout date conflict (bookedBy):`, {
             slotDate: slotDateStr,
             checkoutTime: checkoutTime.toISOString(),
             maintenanceEnd: maintenanceEndTime.toISOString(),
             checkInTime: checkInDate.toISOString(),
             checkInAfterMaintenance: checkInDate >= maintenanceEndTime
           });
-
 
           console.log("checkindate and end maintaince time", checkInDate, maintenanceEndTime);
           
@@ -2275,6 +2368,27 @@ const checkTimeSlotAvailability = async (req, res) => {
           }
         }
       }
+
+      // ── Path (b): Synthetic partially-available slot (no bookedBy) ─────────
+      // These slots are built from checkoutDatesMap and carry a .maintenance object
+      // with availableAfter = checkoutTime + bufferHours.
+      // If check-in is BEFORE availableAfter the slot is still blocked.
+      if (slot.status === 'partially-available' && slot.maintenance?.availableAfter) {
+        const availableAfter = new Date(slot.maintenance.availableAfter);
+        const slotDateStr = new Date(slot.date).toISOString().split('T')[0];
+        const checkInDateStr = formatLocalDate(checkInDate);
+
+        if (slotDateStr === checkInDateStr) {
+          if (checkInDate >= availableAfter) {
+            console.log(`✅ Partially-available date ${slotDateStr}: check-in ${checkInDate.toISOString()} is after availableAfter ${availableAfter.toISOString()} — OK`);
+            return false; // Don't count as conflict — new guest checks in after current guest + buffer
+          } else {
+            console.log(`❌ Partially-available date ${slotDateStr}: check-in ${checkInDate.toISOString()} is BEFORE availableAfter ${availableAfter.toISOString()} — BLOCKED`);
+            // Keep as conflict — falls through to return true below
+          }
+        }
+      }
+
       return true; // Count as conflict
     });
 
@@ -2288,6 +2402,13 @@ const checkTimeSlotAvailability = async (req, res) => {
     const blockingDates = filteredDailyAvailability.filter(slot => {
         // Fully blocking statuses
         if (['booked', 'blocked', 'maintenance', 'unavailable', 'on-hold'].includes(slot.status)) {
+          return true;
+        }
+        
+        // A partially-available slot that survived filteredDailyAvailability means
+        // check-in is BEFORE availableAfter — treat it as blocking.
+        // (If check-in was after availableAfter, the slot was already removed above.)
+        if (slot.status === 'partially-available') {
           return true;
         }
         

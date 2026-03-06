@@ -17,7 +17,8 @@ async function createAdmin() {
     console.log('👤 Create Admin Script');
     console.log('======================\n');
 
-    const mongoUri = "mongodb://localhost:27017/TripMe"
+    // const mongoUri = "mongodb://localhost:27017/TripMe"
+    const mongoUri ="mongodb+srv://shivansh18181818:VyLozlKrwfzuwG4y@tripme.g2s84i3.mongodb.net/tripmeDB?retryWrites=true&w=majority&appName=tripme"
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB\n');
 

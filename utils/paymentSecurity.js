@@ -112,7 +112,9 @@ function validateBookingParameters(bookingData) {
   const errors = [];
   const warnings = [];
   
-  const is24Hour = bookingData.bookingDuration === '24hour' || !!bookingData.checkInDateTime;
+  // Only use the explicit bookingDuration flag — daily bookings also send checkInDateTime
+  // for late check-in pricing, so we must NOT infer 24-hour mode from checkInDateTime alone.
+  const is24Hour = bookingData.bookingDuration === '24hour';
 
   // Validate dates / times
   if (is24Hour) {
