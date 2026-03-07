@@ -23,9 +23,15 @@ const registerUser = async (req, res) => {
     // Check if user already exists
     const userExists = await User.findOne({ email });
     if (userExists) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
-        message: 'User already exists with this email'
+        message: 'User already exists with this email',
+        errors: [
+          {
+            field: 'email',
+            message: 'An account already exists with this email address'
+          }
+        ]
       });
     }
 
@@ -86,6 +92,29 @@ const registerUser = async (req, res) => {
       }
     });
   } catch (error) {
+    // Handle Mongoose validation errors gracefully
+    if (error.name === 'ValidationError') {
+      const errors = Object.keys(error.errors || {}).map((field) => ({
+        field,
+        message: error.errors[field].message
+      }));
+
+      return res.status(400).json({
+        success: false,
+        message: 'Validation error',
+        errors
+      });
+    }
+
+    // Handle unique email race condition (just in case)
+    if (error.code === 11000 && error.keyPattern?.email) {
+      return res.status(409).json({
+        success: false,
+        message: 'User already exists with this email',
+        errors: [{ field: 'email', message: 'An account already exists with this email address' }]
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: 'Error registering user',
