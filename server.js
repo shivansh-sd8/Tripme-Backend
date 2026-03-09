@@ -7,6 +7,10 @@ const connectDB = require('./config/db');
 const app = express();
 const mongoose = require('mongoose'); // Added missing import for mongoose
 
+// Trust Railway's reverse proxy so express-rate-limit and req.ip work correctly.
+// Without this, X-Forwarded-For header causes ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set('trust proxy', 1);
+
 // HOTFIX: Manually set Razorpay env vars if they're missing
 if (!process.env.RAZORPAY_KEY_ID) {
   console.log('⚠️ Setting RAZORPAY_KEY_ID manually as fallback');
