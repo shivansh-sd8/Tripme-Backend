@@ -167,14 +167,8 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Check if email is verified
-    if (!user.isVerified) {
-      console.log("❌ Email not verified");
-      return res.status(401).json({
-        success: false,
-        message: 'Please verify your email before logging in. Check your inbox for the verification link.'
-      });
-    }
+    // Email verification is NOT enforced at login.
+    // isVerified is returned in the response so the frontend can prompt the user to verify.
 
     // Generate JWT token
     const token = user.generateAuthToken();
@@ -625,13 +619,8 @@ const socialLogin = async (req, res) => {
       });
     }
 
-    // Check if email is verified
-    if (!user.isVerified) {
-      return res.status(401).json({
-        success: false,
-        message: 'Please verify your email before logging in. Check your inbox for the verification link.'
-      });
-    }
+    // Email verification is NOT enforced at login — users can log in with unverified emails.
+    // The isVerified flag is returned in the response so the frontend/profile can prompt verification.
 
     // Generate JWT token
     const jwtToken = user.generateAuthToken();
