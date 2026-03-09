@@ -461,6 +461,31 @@ const changePassword = async (req, res) => {
   }
 };
 
+
+// Helper: call Google userinfo endpoint with the user's access token directly.
+// We do NOT use googleClient.request() here because that method attaches its own
+// server-side OAuth2 credentials and overrides the Bearer token, causing a 401.
+const fetchGoogleUserInfo = (accessToken) =>
+  new Promise((resolve, reject) => {
+    const https = require('https');
+    const options = {
+      hostname: 'www.googleapis.com',
+      path: '/oauth2/v2/userinfo',
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
+        catch (e) { reject(new Error('Failed to parse Google userinfo response')); }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+
 // @desc    Social login (Google/Facebook)
 // @route   POST /api/auth/social-login
 // @access  Public
@@ -475,11 +500,8 @@ const socialLogin = async (req, res) => {
         console.log('Token length:', token ? token.length : 0);
         console.log('Token preview:', token ? token.substring(0, 20) + '...' : 'No token');
         
-        // Fetch user info using Google client (works without global fetch)
-        const userInfoResponse = await googleClient.request({
-          url: 'https://www.googleapis.com/oauth2/v2/userinfo',
-          headers: { Authorization: `Bearer ${token}` }
-        });
+        // Call Google userinfo directly with the user's access token
+        const userInfoResponse = await fetchGoogleUserInfo(token);
 
         console.log('Google API response status:', userInfoResponse.status);
         
