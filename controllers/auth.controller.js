@@ -13,6 +13,14 @@ const googleClient = new OAuth2Client(
   process.env.GOOGLE_CLIENT_SECRET
 );
 
+// FRONTEND_URL may be comma-separated (e.g. on Railway where multiple origins are listed).
+// Always use the FIRST URL for links in emails.
+const getFrontendUrl = () =>
+  (process.env.FRONTEND_URL || 'http://localhost:3000')
+    .split(',')
+    .map(u => u.trim())
+    .filter(Boolean)[0] || 'http://localhost:3000';
+
 // @desc    Register user
 // @route   POST /api/auth/register
 // @access  Public
@@ -54,7 +62,7 @@ const registerUser = async (req, res) => {
     });
 
     // Send verification email (non-blocking with timeout to avoid slowing registration on cold deploys)
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = getFrontendUrl();
     const verificationUrl = `${frontendUrl}/auth/verify-email?token=${verificationToken}`;
     console.log('Sending welcome email to:', user.email);
     console.log('Verification URL:', verificationUrl);
@@ -273,7 +281,7 @@ const forgotPassword = async (req, res) => {
 
     // Send reset email
     // Use frontend URL for password reset - the frontend will handle the API call
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = getFrontendUrl();
     const resetUrl = `${frontendUrl}/auth/reset-password?token=${resetToken}`;
     await sendPasswordResetEmail(user.email, user.name, resetUrl);
 
@@ -698,7 +706,7 @@ const resendVerificationEmail = async (req, res) => {
 
     // Send verification email
     // Use frontend URL for verification - the frontend will handle the API call
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = getFrontendUrl();
     const verificationUrl = `${frontendUrl}/auth/verify-email?token=${verificationToken}`;
     await sendWelcomeEmail(user.email, user.name, verificationUrl);
 
