@@ -75,10 +75,11 @@ async function calculate24HourPricing(params) {
   let baseAmount = basePrice24Hour;
   
   // Add extra hours beyond 24 (using existing extension logic)
+  let extraHoursCost = 0;
   if (totalHours > 24) {
     const extraHours = totalHours - 24;
-    const extensionCost = calculateHourlyExtension(basePrice24Hour, extraHours);
-    baseAmount += extensionCost;
+    extraHoursCost = calculateHourlyExtension(basePrice24Hour, extraHours);
+    // Do NOT add to baseAmount here so it shows separately in the UI breakdown
   }
   
   // Add extra guest charges
@@ -90,7 +91,7 @@ async function calculate24HourPricing(params) {
   const hostFees = cleaningFee + serviceFee;
   
   // Add hourly extension
-  const extensionCost = hourlyExtension || 0;
+  const extensionCost = (hourlyExtension || 0) + extraHoursCost;
   
   // Calculate subtotal for host earning (excluding security deposit)
   const hostSubtotal = baseAmount + hostFees + extensionCost - discountAmount;
