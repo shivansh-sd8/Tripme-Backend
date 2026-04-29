@@ -1,5 +1,5 @@
 const Availability = require('../models/Availability');
-const ServiceAvailibility = require('../../../backUp/ServiceAvailibility');
+
 const Service = require('../models/Service');
 const Property = require('../models/Property');
 
