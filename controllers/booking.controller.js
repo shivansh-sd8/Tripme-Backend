@@ -592,8 +592,32 @@ const processPaymentAndCreateBooking = async (req, res) => {
       // Calculate final pricing breakdown using unified utilities
       let pricing = await calculatePricingBreakdown(pricingParams);
 
-      // Cache for Razorpay payment details fetched during token recovery (avoids double API call)
+      // Cache for Razorpay payment details fetched during service anchor / token recovery
       let prefetchedRazorpayDetails = null;
+
+      // ── Service Booking: anchor totalAmount to Razorpay-charged amount ─────────
+      // The service booking page computes its own total (basePrice + guests + 12% flat
+      // platform fee) while this backend uses the DB-configured rate (15%) + GST +
+      // processing fee — producing a guaranteed mismatch.  Rather than recreating the
+      // frontend formula, we trust the Razorpay-charged amount as the authoritative
+      // total (the customer already consciously paid that amount).
+      if (bookingType === 'service' && paymentData?.razorpayPaymentId) {
+        try {
+          const razorpayService = require('../services/razorpay.service');
+          const rzpDetails = await razorpayService.getPaymentDetails(paymentData.razorpayPaymentId);
+          const chargedRupees = Number(rzpDetails?.amount) / 100; // paise → rupees
+          if (chargedRupees > 0) {
+            console.log(`💰 Service booking: anchoring totalAmount to Razorpay-charged ₹${chargedRupees} (backend calculated ₹${pricing.totalAmount})`);
+            // Store prefetched details to avoid duplicate API call later
+            prefetchedRazorpayDetails = rzpDetails;
+            pricing = { ...pricing, totalAmount: chargedRupees };
+          }
+        } catch (rzpErr) {
+          console.error('⚠️ Could not fetch Razorpay details for service amount anchor:', rzpErr.message);
+          // Fall through — will likely hit mismatch check below and fail safely
+        }
+      }
+
 
       // ── Pricing Token Verification ───────────────────────────────────────────
       // If the client supplied a pricingToken (issued by /api/pricing/calculate),

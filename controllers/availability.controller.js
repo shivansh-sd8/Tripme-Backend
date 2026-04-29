@@ -1,4 +1,6 @@
 const Availability = require('../models/Availability');
+const ServiceAvailibility = require('../../../backUp/ServiceAvailibility');
+const Service = require('../models/Service');
 const Property = require('../models/Property');
 
 // ========================================
@@ -2540,6 +2542,8 @@ const hasConflicts =
 // END NEW: HOURLY AVAILABILITY ENDPOINTS
 // ========================================
 
+
+
 module.exports = {
   // OLD: Existing exports (keep these)
   getPropertyAvailability,
@@ -2562,5 +2566,7 @@ module.exports = {
   getPropertyEvents,
   updateMaintenanceTime,
   getNextAvailableSlot,
-  checkTimeSlotAvailability
+  checkTimeSlotAvailability,
+
+  
 };

@@ -496,7 +496,7 @@ const getServiceAvailability = async (req, res) => {
   try {
     const { id } = req.params;
     const { startDate, endDate } = req.query;
-
+    console.log(id);
     const service = await Service.findById(id);
     if (!service) {
       return res.status(404).json({

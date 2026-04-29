@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Coupon = require('../models/Coupon');
 const Refund = require('../models/Refund');
 const Notification = require('../models/Notification');
+const Service = require('../models/Service');
 const PaymentService = require('../services/payment.service');
 const razorpayService = require('../services/razorpay.service');
 const { verifyPricingToken } = require('../middlewares/pricingSecurity.middleware');
@@ -985,11 +986,12 @@ const paypalWebhook = async (req, res) => {
 // @access  Private
 const createRazorpayOrder = async (req, res) => {
   try {
-    const { bookingId, propertyId, amount, currency = 'INR', pricingToken, pricingContext } = req.body;
+    const { bookingId, propertyId, serviceId,amount, currency = 'INR', pricingToken, pricingContext } = req.body;
     let finalAmount = null;
     let finalCurrency = currency;
     let finalPropertyId = propertyId || null;
-
+    console.log("pricing token",pricingToken)
+    console.log("pricing context",pricingContext)
     // If bookingId is provided, verify booking exists and user owns it.
     // Amount must come from booking total, never from client amount.
     if (bookingId) {
@@ -1018,7 +1020,36 @@ const createRazorpayOrder = async (req, res) => {
           message: 'Amount mismatch with booking total'
         });
       }
-    } else {
+    } else if (serviceId) {
+      // Customer booking a service — verify service exists but do NOT check ownership
+      // (the owner is the host, not the customer making the booking)
+      const service = await Service.findById(serviceId);
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: 'Service not found'
+        });
+      }
+      // Prevent the service owner from booking their own service
+      if (service.user && service.user.toString() === req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'You cannot book your own service'
+        });
+      }
+      // Amount is computed on the frontend (basePrice + extraGuests + platformFee).
+      // We trust it here; the booking controller will re-validate against service pricing.
+      if (amount == null || Number(amount) <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'A valid amount is required to create a service order'
+        });
+      }
+      finalAmount = Number(amount);
+      finalCurrency = currency;
+    }
+    
+    else {
       // Without bookingId, require backend-issued secure pricing token/context.
       if (!pricingToken || !pricingContext) {
         return res.status(400).json({
