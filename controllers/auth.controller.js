@@ -6,12 +6,17 @@ const { generateToken } = require('../utils/generateToken');
 const { sendEmail, sendWelcomeEmail, sendPasswordResetEmail } = require('../utils/sendEmail');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-// Google OAuth client (used instead of global fetch so it works on Node 16 too)
+// Google OAuth client
 const { OAuth2Client } = require('google-auth-library');
-const googleClient = new OAuth2Client(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET
-);
+const googleClient = new OAuth2Client();
+
+// Initialize the client with credentials
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  googleClient.setCredentials({
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    client_secret: process.env.GOOGLE_CLIENT_SECRET
+  });
+}
 
 // FRONTEND_URL may be comma-separated (e.g. on Railway where multiple origins are listed).
 // Always use the FIRST URL for links in emails.
@@ -507,8 +512,8 @@ const socialLogin = async (req, res) => {
 
         console.log('Google API response status:', userInfoResponse.status);
         
-        if (userInfoResponse.status !== 200) {
-          const errorText = JSON.stringify(userInfoResponse.data);
+        if (!response.ok) {
+          const errorText = await response.text();
           console.error('Google API error response:', errorText);
           return res.status(401).json({
             success: false,
@@ -517,7 +522,7 @@ const socialLogin = async (req, res) => {
           });
         }
         
-        const userInfo = userInfoResponse.data;
+        const userInfo = await response.json();
         console.log('Google API user info received:', {
           hasEmail: !!userInfo.email,
           hasName: !!userInfo.name,
