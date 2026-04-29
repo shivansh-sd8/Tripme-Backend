@@ -579,7 +579,7 @@ const getListing = async (req, res) => {
     } else {
       responseData = transformListingForFrontend(listing);
      responseData.badges = {
-  highlight: [{ label: "Guest favourite", icon: "🏆" }],
+  highlight: [{ label: "Guest favourite", icon: "🌿" }],
   details: [
     { label: "Exceptional check-in", icon: "🔑" },
     { label: "Great location", icon: "📍" }
